@@ -5,7 +5,7 @@ from pretrained.PyTorch_CIFAR10.cifar10_models.resnet import resnet18
 from quant import *
 from myVisualize import *
 import torch
-import linklink as link
+# import linklink as link
 from quant.quant_layer import QuantModule, StraightThrough, lp_loss
 from quant.quant_model import QuantModel
 from quant.block_recon import LinearTempDecay
@@ -94,32 +94,27 @@ def layer_channelGreedy(model: QuantModel, layer: QuantModule, cali_data: torch.
     out_quant = layer(cur_inp)
     errPrv = lp_loss(out_quant, cur_out, p=2.4).detach().cpu().data
     # print("Original err: ", errPrv)
-    numChannel = layer.weight.shape[0]
+    numChannel = layer.weight_quantizer.nchannel
     errOfChannel = np.zeros(numChannel)
-    for i in range(numChannel):
-        layer.weight_quantizer.changeResol(i)
-        out_quant = layer(cur_inp)
-        errOfChannel[i] = lp_loss(out_quant, cur_out, p=2.4).detach().cpu().data
+    for nc in range(numChannel[0]):
+        for ic in range(numChannel[1]):
+            layer.weight_quantizer.changeResol(nc, ic)
+            out_quant = layer(cur_inp)
+            errOfChannel[nc,ic] = lp_loss(out_quant, cur_out, p=2.4).detach().cpu().data
     
-    # print(errOfChannel)
-    sorted_idx = np.argsort(errOfChannel)
-    # print(sorted_idx)
-    # print(errOfChannel[sorted_idx])
-    
+    sorted_idx = np.argsort(errOfChannel.ravel())
+
     layer.weight_quantizer.resetResol()
-    for i in sorted_idx:
-        layer.weight_quantizer.setResol(i)
+    for idx in tqdm(sorted_idx):
+        nc, ic = idx//numChannel[1], idx%numChannel[1]
+        layer.weight_quantizer.setResol(nc, ic, 1)
         out_quant = layer(cur_inp)
         scaledLoss = lp_loss(out_quant, cur_out, p=2.4).detach().cpu().data
         if scaledLoss < errPrv:
             errPrv = scaledLoss
-            # print("Channel %d: err: %f" % (i, errPrv))
         else:
-            layer.weight_quantizer.setResol(i, 0)
-    # out_quant = layer(cur_inp)
-    # errPrv = lp_loss(out_quant, cur_out, p=2.4).detach().cpu().data
-    # print(">>>After err: ", errPrv)
-    # print(layer.weight_quantizer.simpleScale)
+            layer.weight_quantizer.setResol(nc, ic, 1)
+    print(layer.weight_quantizer.simpleScale)
 
 def layer_channelRandomize(model: QuantModel, layer: QuantModule, cali_data: torch.Tensor,
                          batch_size: int = 32, iters: int = 20000, weight: float = 0.001, opt_mode: str = 'mse',
@@ -129,90 +124,21 @@ def layer_channelRandomize(model: QuantModel, layer: QuantModule, cali_data: tor
     # Replace weight quantizer to channelWiseQuantizer
     layer.weight_quantizer = ChannelQuant(uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data, shuffle_ratio=shuffle_ratio, qscale=qscale)
 
-    
-    # #No study, when eval mode
-    # if eval:
-    #     iters = 0
-        
-    # model.set_quant_state(False, False)
-    # layer.set_quant_state(True, act_quant)
-    # round_mode = 'learned_hard_sigmoid'
-    
-    # if not include_act_func:
-    #     org_act_func = layer.activation_function
-    #     layer.activation_function = StraightThrough()
-
-    # if not act_quant:
-    #     # Replace weight quantizer to AdaRoundQuantizer
-    #     layer.weight_quantizer = AdaRoundQuantizer(uaq=layer.weight_quantizer, round_mode=round_mode,
-    #                                                weight_tensor=layer.org_weight.data)
-    #     layer.weight_quantizer.soft_targets = True
-
-    #     # Set up optimizer
-    #     opt_params = [layer.weight_quantizer.alpha]
-    #     optimizer = torch.optim.Adam(opt_params)
-    #     scheduler = None
-    # else:
-    #     # Use UniformAffineQuantizer to learn delta
-    #     opt_params = [layer.act_quantizer.delta]
-    #     optimizer = torch.optim.Adam(opt_params, lr=lr)
-    #     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=iters, eta_min=0.)
-    # loss_mode = 'none' if act_quant else 'relaxation'
-    # rec_loss = opt_mode
-
-    # loss_func = LossFunction(layer, round_loss=loss_mode, weight=weight,
-    #                          max_count=iters, rec_loss=rec_loss, b_range=b_range,
-    #                          decay_start=0, warmup=warmup, p=p)
-
-    # # Save data before optimizing the rounding
-    # if iters>0:
-    #     cached_inps, cached_outs = save_inp_oup_data(model, layer, cali_data, asym, act_quant, batch_size)
-        
-    # if opt_mode != 'mse':
-    #     cached_grads = save_grad_data(model, layer, cali_data, act_quant, batch_size=batch_size)
-    # else:
-    #     cached_grads = None
-    # device = 'cuda'
-    # for i in range(iters):
-    #     idx = torch.randperm(cached_inps.size(0))[:batch_size]
-    #     cur_inp = cached_inps[idx]
-    #     cur_out = cached_outs[idx]
-    #     cur_grad = cached_grads[idx] if opt_mode != 'mse' else None
-
-    #     optimizer.zero_grad()
-    #     out_quant = layer(cur_inp)
-
-    #     err = loss_func(out_quant, cur_out, cur_grad)
-    #     err.backward(retain_graph=True)
-    #     if multi_gpu:
-    #         for p in opt_params:
-    #             link.allreduce(p.grad)
-    #     optimizer.step()
-    #     if scheduler:
-    #         scheduler.step()
-
-    # torch.cuda.empty_cache()
-
-    # # Finish optimization, use hard rounding.
-    # layer.weight_quantizer.soft_targets = False
-
-    # # Reset original activation function
-    # if not include_act_func:
-    #     layer.activation_function = org_act_func
-    
 def channelGreedyTest(qnn, test_loader, cali_data, args):
     kwargs = dict(cali_data=cali_data, iters=args.iters_w, weight=args.weight, asym=True,
                 b_range=(args.b_start, args.b_end), warmup=args.warmup, act_quant=False, opt_mode='mse', eval=True, shuffle_ratio=0.0, qscale=1/2)
     
-    def channelGreedy(model: nn.Module):
+    def channelGreedy(model: nn.Module, prv_name=""):
         for name, module in model.named_children():
             if isinstance(module, QuantModule):
                 if module.ignore_reconstruction is True:
                     continue
                 else:
-                    layer_channelGreedy(qnn, module, **kwargs)
+                    print("Running layer channel greedy ", prv_name+'.'+name)
+                    if prv_name+'.'+name == '.model.layer1.0.conv1':
+                        layer_channelGreedy(qnn, module, **kwargs)
             else:
-                channelGreedy(module)
+                channelGreedy(module, prv_name+'.'+name)
                 
     # Start calibration
     def printGreedy(model: nn.Module):
@@ -227,58 +153,105 @@ def channelGreedyTest(qnn, test_loader, cali_data, args):
                 printGreedy(module)
     
     qnn.set_quant_state(weight_quant=True, act_quant=False)
-    # channelGreedy(qnn)
+    channelGreedy(qnn)
     qnn.set_quant_state(weight_quant=True, act_quant=False)
-    print(f'Quantized accuracy After  brecq: {validate_model(test_loader, qnn):.3f}')
+    accuracy = validate_model(test_loader, qnn).data.cpu().numpy()
+    print(f'Quantized accuracy After  brecq: {accuracy:.3f}')
+    dumpResol(qnn, "results/bestResol/GreedyResult_resol.pkl")
+    with open(f'./results/GreedyResult.pkl', 'wb') as f:
+        pickle.dump(accuracy, f)
+
+def dumpResol(qnn, filename):
+    data = {}
+    searchResol(qnn, data, '')
+    with open(filename, 'wb') as f:
+        pickle.dump(data, f)
+    
+
+def extractWeights(qnn, filename):
+    data = {}
+    searchWeights(qnn, data, '')
+    with open(filename, 'wb') as f:
+        pickle.dump(data, f)
+
+def searchWeights(model: nn.Module, data, prv_name):
+    for name, module in model.named_children():
+        if isinstance(module, QuantModule):
+            if module.ignore_reconstruction is True:
+                continue
+            else:
+                data[prv_name+'.'+name] = module.weight.data.cpu().numpy()
+                # print(name, module.weight_quantizer.sel_resol)
+        else:
+            searchWeights(module, data, prv_name+'.'+name)
+        
+def searchResol(model: nn.Module, data, prv_name=""):
+    for name, module in model.named_children():
+        if isinstance(module, QuantModule):
+            if module.ignore_reconstruction is True:
+                continue
+            else:
+                if prv_name+'.'+name == '.model.layer1.0.conv1':
+                    data[prv_name+'.'+name] = module.weight_quantizer.sel_resol.data.cpu().numpy()
+                # print(name, module.weight_quantizer.sel_resol)
+        else:
+            searchResol(module, data, prv_name+'.'+name)
 
 def channelRandomizeTest(qnn, test_loader, cali_data, shuffle_ratio, args):
     kwargs = dict(cali_data=cali_data, iters=args.iters_w, weight=args.weight, asym=True,
                 b_range=(args.b_start, args.b_end), warmup=args.warmup, act_quant=False, opt_mode='mse', eval=True, shuffle_ratio=shuffle_ratio, qscale=1/2)
     
-    def channelRandomize(model: nn.Module):
+    def channelRandomize(model: nn.Module, prv_name=""):
         for name, module in model.named_children():
             if isinstance(module, QuantModule):
                 if module.ignore_reconstruction is True:
                     continue
                 else:
-                    layer_channelRandomize(qnn, module, **kwargs)
-                    # layer_channelGreedy(qnn, module, **kwargs)
+                    if prv_name+'.'+name == '.model.layer1.0.conv1':
+                        layer_channelRandomize(qnn, module, **kwargs)
             else:
-                channelRandomize(module)
-    # Start calibration
+                channelRandomize(module, prv_name+'.'+name)
     
     qnn.set_quant_state(weight_quant=True, act_quant=False)
     
+    bestResult = 0.0
     testResult = []
-    for i in tqdm(range(3000), desc=f'random value={shuffle_ratio}'):
-        channelRandomize(qnn)
+    t = tqdm(range(3000), desc=f'random value={shuffle_ratio}')
+    for i in t:
+        channelRandomize(qnn, '')
         qnn.set_quant_state(weight_quant=True, act_quant=False)
-        testResult.append(validate_model(test_loader, qnn, print_result=False))
+        testResult.append(validate_model(test_loader, qnn, print_result=False).data.cpu().numpy())
+        # extractWeights(qnn, f'./results/weights/rawWeights.pkl')
+        if testResult[-1] > bestResult:
+            bestResult = testResult[-1]
+            dumpResol(qnn, "results/bestResol/channelRandomL0_only_1.2_resol.{shuffle_ratio}.pkl")
+        t.set_description(f"best {bestResult:.3f} cur {testResult[-1]:.3f}")
+            
     print("Best Accuracy : ", max(testResult))
-    with open(f'./results/channelRandom1.2_fixed.{shuffle_ratio}.pkl', 'wb') as f:
+    with open(f'./results/channelRandomL0_only_1.2_fixed.{shuffle_ratio}.pkl', 'wb') as f:
         pickle.dump(testResult, f)
             
 if __name__ == '__main__':
-    args = loadArgments()
+    ratios = [0.01, 0.02, 0.04, 0.08, 0.1, 0.2, 0.3, 0.4, 0.5, 0.8, 1.0]
+    # ratios = [0.1]
+    SKIP_TEST = True
     
+    args = loadArgments()
     seed_all(args.seed)
-        # build cifar10 data loader
     train_loader, test_loader = build_cifar10_data(batch_size=args.batch_size, workers=args.workers,
                                                     data_path=args.data_path)
-    # ratios = [0.0, 0.01, 0.02, 0.04, 0.08, 0.1, 0.2, 0.3, 0.4, 0.5, 0.8, 1.0]
-    ratios = [0.08]
+
     for shuffle_ratio in ratios:
         cnn = resnet18(pretrained=True, device='cuda:0')
-        # print_model_hierarchy(cnn)
         cnn.cuda()
         cnn.eval()
-        print(f'accuracy of original : {validate_model(test_loader, cnn):.3f}')
+        if not SKIP_TEST:
+            print(f'accuracy of original : {validate_model(test_loader, cnn):.3f}')
         
         # build quantization parameters
         wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'CWQ':True}
         aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'leaf_param': args.act_quant}
         qnn = QuantModel(model=cnn, weight_quant_params=wq_params, act_quant_params=aq_params)
-        # print_model_hierarchy(qnn)
         qnn.cuda()
         qnn.eval()
         if not args.disable_8bit_head_stem:
@@ -295,11 +268,9 @@ if __name__ == '__main__':
         _ = qnn(cali_data[:64].to(device))
         # torch.save(qnn.state_dict(), f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth')
         # st = torch.load(f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth')
-        print(f'Quantized accuracy before brecq: {validate_model(test_loader, qnn):.3f}')
+        if not SKIP_TEST:
+            print(f'Quantized accuracy before brecq: {validate_model(test_loader, qnn):.3f}')
         #Load Weight
         channelRandomizeTest(qnn, test_loader, cali_data, shuffle_ratio, args)
         # channelGreedyTest(qnn, test_loader, cali_data, args)
         # break
-        
-
-

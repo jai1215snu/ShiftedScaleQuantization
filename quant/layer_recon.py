@@ -1,5 +1,5 @@
 import torch
-import linklink as link
+# import linklink as link
 from quant.quant_layer import QuantModule, StraightThrough, lp_loss
 from quant.quant_model import QuantModel
 from quant.block_recon import LinearTempDecay
@@ -87,9 +87,9 @@ def layer_reconstruction(model: QuantModel, layer: QuantModule, cali_data: torch
 
         err = loss_func(out_quant, cur_out, cur_grad)
         err.backward(retain_graph=True)
-        if multi_gpu:
-            for p in opt_params:
-                link.allreduce(p.grad)
+        # if multi_gpu:
+        #     for p in opt_params:
+        #         link.allreduce(p.grad)
         optimizer.step()
         if scheduler:
             scheduler.step()

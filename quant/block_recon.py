@@ -1,5 +1,5 @@
 import torch
-import linklink as link
+# import linklink as link
 from quant.quant_layer import QuantModule, StraightThrough, lp_loss
 from quant.quant_model import QuantModel
 from quant.quant_block import BaseQuantBlock

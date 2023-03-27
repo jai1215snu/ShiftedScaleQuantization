@@ -5,7 +5,6 @@ from quant.fold_bn import search_fold_and_remove_bn
 
 
 class QuantModel(nn.Module):
-
     def __init__(self, model: nn.Module, weight_quant_params: dict = {}, act_quant_params: dict = {}):
         super().__init__()
         search_fold_and_remove_bn(model)
@@ -78,10 +77,9 @@ class QuantModel(nn.Module):
                 module_list += [m]
         module_list[-1].disable_act_quant = True
 
-    def synchorize_activation_statistics(self):
-        import linklink.dist_helper as dist
-        for m in self.modules():
-            if isinstance(m, QuantModule):
-                if m.act_quantizer.delta is not None:
-                    dist.allaverage(m.act_quantizer.delta)
-
+    # def synchorize_activation_statistics(self):
+    #     import linklink.dist_helper as dist
+    #     for m in self.modules():
+    #         if isinstance(m, QuantModule):
+    #             if m.act_quantizer.delta is not None:
+    #                 dist.allaverage(m.act_quantizer.delta)
