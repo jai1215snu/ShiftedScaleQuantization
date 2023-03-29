@@ -199,8 +199,17 @@ class QuantModule(nn.Module):
 
         self.se_module = se_module
         self.extra_repr = org_module.extra_repr
+        
+        self.cache_features      = False
+        self.cached_inp_features = []
+        self.cached_out_features = []
+        self.cached_out_quant_features = []
+
 
     def forward(self, input: torch.Tensor):
+        if self.cache_features:
+            self.cached_inp_features += [input.clone().detach()]
+            
         if self.use_weight_quant:
             weight = self.weight_quantizer(self.weight)
             bias = self.bias
@@ -208,28 +217,9 @@ class QuantModule(nn.Module):
             weight = self.org_weight
             bias = self.org_bias
             
-        # if self.weight_quantizer.n_bits == 4:
-        #     import seaborn as sns
-        #     import matplotlib.pyplot as plt
-        #     import numpy as np
-        #     data0 = self.weight.detach().cpu().numpy()[0]
-        #     data1 = weight.detach().cpu().numpy()[0]
-        #     data_range = [min(np.min(data0), np.min(data1)), max(np.max(data0), np.max(data1))]
-        #     bins = np.histogram_bin_edges(data_range, bins=80)
-        #     sns.distplot(data0, hist=True, kde=False, 
-        #             bins=bins,
-        #             hist_kws={'color': 'blue', 'alpha': 0.5})
-        #     sns.distplot(data1, hist=True, kde=False, 
-        #             bins=bins,
-        #             hist_kws={'color': 'red', 'alpha': 0.5})
-        #     # for i in range(5):
-        #     #     sns.scatterplot(x=data0[i].flatten(), y=data1[i].flatten())
-        #     plt.savefig('result.png', dpi=300)
-        #     print(self.weight_quantizer.n_bits)
-        #     exit(1)
+
         out = self.fwd_func(input, weight, bias, **self.fwd_kwargs)
-        # disable act quantization is designed for convolution before elemental-wise operation,
-        # in that case, we apply activation function and quantization after ele-wise op.
+
         if self.se_module is not None:
             out = self.se_module(out)
         out = self.activation_function(out)
@@ -237,7 +227,31 @@ class QuantModule(nn.Module):
             return out
         if self.use_act_quant:
             out = self.act_quantizer(out)
+            
+        if self.cache_features:
+            self.cached_out_features += [out.clone().detach()]
         return out
+    
+    def cal_quantLoss(self):
+        quant_out = []
+        for inp in self.cached_inp_features:
+            quant_out += [self.forward(inp).detach()]
+        
+        ori_out = self.cached_out_features
+        
+        # weight_quant = self.weight_quantizer(self.weight)
+        
+        #Calculate Loss(difference between quantized output and original output)
+        loss = 0.0
+        # loss = F.mse_loss(weight_quant, self.weight)
+        # loss = (weight_quant - self.weight).abs().pow(2.4).sum(1).mean()
+        for i in range(len(quant_out)):
+            loss += (quant_out[i] - ori_out[i]).abs().pow(2.4).sum(1).mean()
+            loss += F.mse_loss(quant_out[i], ori_out[i])
+        #TODO:Temp
+        self.cached_out_quant_features = quant_out
+            
+        return loss.detach().cpu().item()
 
     def set_quant_init_state(self):
         self.weight_quantizer.inited = True
@@ -245,3 +259,8 @@ class QuantModule(nn.Module):
     def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
         self.use_weight_quant = weight_quant
         self.use_act_quant = act_quant
+    def disable_cache_features(self):
+        self.cache_features = False
+        
+    # def run_layerGreedy():
+        

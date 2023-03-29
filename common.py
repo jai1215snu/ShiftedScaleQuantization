@@ -39,6 +39,10 @@ def loadArgments():
     parser.add_argument('--iters_a', default=5000, type=int, help='number of iteration for LSQ')
     parser.add_argument('--lr', default=4e-4, type=float, help='learning rate for LSQ')
     parser.add_argument('--p', default=2.4, type=float, help='L_p norm minimization for LSQ')
+    
+    #choigj
+    parser.add_argument('--skip_test', default=True, type=bool, help='skip default test')
+    
 
     return parser.parse_args()
     

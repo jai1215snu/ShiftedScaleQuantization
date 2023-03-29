@@ -2,6 +2,7 @@ checkPoint/
 pretrained/
 results/
 trash/
+temp/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

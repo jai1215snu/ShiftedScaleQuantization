@@ -54,7 +54,7 @@ class QuantModel(nn.Module):
         for m in self.model.modules():
             if isinstance(m, (QuantModule, BaseQuantBlock)):
                 m.set_quant_init_state()
-
+    
     def forward(self, input):
         return self.model(input)
 
@@ -76,6 +76,11 @@ class QuantModel(nn.Module):
             if isinstance(m, QuantModule):
                 module_list += [m]
         module_list[-1].disable_act_quant = True
+        
+    def disable_cache_features(self):
+        for m in self.model.modules():
+            if isinstance(m, (QuantModule, BaseQuantBlock)):
+                m.disable_cache_features()
 
     # def synchorize_activation_statistics(self):
     #     import linklink.dist_helper as dist
