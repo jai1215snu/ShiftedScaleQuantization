@@ -122,7 +122,7 @@ def get_train_samples(train_loader, num_samples):
     return torch.cat(train_data, dim=0)[:num_samples]
 
 @torch.no_grad()
-def validate_model(val_loader, model, device=None, print_freq=100, print_result=True):
+def validate_model(val_loader, model, device=None, print_freq=100, print_result=False):
     if device is None:
         device = next(model.parameters()).device
     else:

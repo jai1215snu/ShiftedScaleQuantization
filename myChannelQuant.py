@@ -234,7 +234,8 @@ def channelRandomizeTest(qnn, test_loader, cali_data, shuffle_ratio, args):
 if __name__ == '__main__':
     ratios = [0.01, 0.02, 0.04, 0.08, 0.1, 0.2, 0.3, 0.4, 0.5, 0.8, 1.0]
     # ratios = [0.1]
-    SKIP_TEST = True
+    SKIP_TEST = False
+    QUANT_INIT = True
     
     args = loadArgments()
     seed_all(args.seed)
@@ -262,15 +263,18 @@ if __name__ == '__main__':
         
         # # Initialize weight quantization parameters
         qnn.set_quant_state(True, False)
-        qnn.set_quant_init_state()
-        qnn.load_state_dict(torch.load(f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth'))
+        if QUANT_INIT:
+            _ = qnn(cali_data[:64].to(device))
+            torch.save(qnn.state_dict(), f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth')
+            qnn.set_quant_init_state()
+        else:
+            qnn.load_state_dict(torch.load(f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth'))
         
-        _ = qnn(cali_data[:64].to(device))
-        # torch.save(qnn.state_dict(), f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth')
         # st = torch.load(f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth')
         if not SKIP_TEST:
             print(f'Quantized accuracy before brecq: {validate_model(test_loader, qnn):.3f}')
+        exit(1)
         #Load Weight
-        channelRandomizeTest(qnn, test_loader, cali_data, shuffle_ratio, args)
+        # channelRandomizeTest(qnn, test_loader, cali_data, shuffle_ratio, args)
         # channelGreedyTest(qnn, test_loader, cali_data, args)
         # break

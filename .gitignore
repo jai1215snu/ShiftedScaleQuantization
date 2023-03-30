@@ -133,3 +133,4 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+QNN_CW_W2_FP32.pth

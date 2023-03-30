@@ -37,7 +37,20 @@ class ChannelQuant(nn.Module):
             x_int = torch.round(x / self.delta)
             
         x_quant = torch.clamp(x_int + self.zero_point, 0, self.n_levels - 1)
-        x_float_q = (x_quant - self.zero_point) * self.delta
+        x_float_q = (x_quant - self.zero_point) * self.delta / self.shiftedScale.expand(x.shape)
+        
+        return x_float_q
+    
+    def getQuantWeight(self, x):
+        if len(self.delta.shape) == 4:
+            x = x * self.shiftedScale.expand(x.shape)
+            x_int = torch.round(x / self.delta)
+        else:
+            #TODO: FC layer control
+            x_int = torch.round(x / self.delta)
+            
+        x_quant = torch.clamp(x_int + self.zero_point, 0, self.n_levels - 1)
+        x_float_q = (x_quant - self.zero_point) * self.delta / self.shiftedScale.expand(x.shape)
         
         return x_float_q
 
@@ -57,10 +70,18 @@ class ChannelQuant(nn.Module):
         self.simpleScale[oc, ic] = value
         self.simpleScale = (torch.ones_like(self.simpleScale) - (self.simpleScale.float() * (1-self.qscale))).to(self.device)
         
+    def setScale(self, selected):
+        mask = (selected == 0)
+        self.shiftedScale[mask] = 1.0
+        mask = (selected == 1)
+        self.shiftedScale[mask] = 0.5
+        mask = (selected == 2)
+        self.shiftedScale[mask] = 0.75
+        mask = (selected == 3)
+        self.shiftedScale[mask] = 1.25
+        # self.shiftedScale[~mask] = self.qscale
+        
     def run_layerRandomize(self):
         randomValue = torch.multinomial(torch.tensor([1-self.shuffle_ratio, self.shuffle_ratio]), num_samples=self.nchannel[0]*self.nchannel[1], replacement=True)
         randomValue = randomValue.reshape(self.nchannel[0], self.nchannel[1])
-        mask = (randomValue == 0)
-        self.shiftedScale[mask] = 1.0
-        self.shiftedScale[~mask] = self.qscale
-    
+        self.setScale(randomValue)

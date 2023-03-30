@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Union
+from tqdm import tqdm
+from common import *
 
 
 class StraightThrough(nn.Module):
@@ -56,6 +58,7 @@ class UniformAffineQuantizer(nn.Module):
         self.channel_wise = channel_wise
         self.scale_method = scale_method
         
+        #NOTE: Remove this if you want to QUANT_INIT(save torch)
         if CWQ:
             if len(ch) == 2:
                 self.delta = torch.nn.Parameter(torch.zeros(size=(ch[0],1)))
@@ -204,13 +207,16 @@ class QuantModule(nn.Module):
         self.cached_inp_features = []
         self.cached_out_features = []
         self.cached_out_quant_features = []
+        
+        self.selectionInited = False
+        self.selection = None # for greedy selection
 
 
     def forward(self, input: torch.Tensor):
         if self.cache_features:
             self.cached_inp_features += [input.clone().detach()]
             
-        if self.use_weight_quant:
+        if self.use_weight_quant and not self.cache_features:
             weight = self.weight_quantizer(self.weight)
             bias = self.bias
         else:
@@ -233,25 +239,20 @@ class QuantModule(nn.Module):
         return out
     
     def cal_quantLoss(self):
-        quant_out = []
-        for inp in self.cached_inp_features:
-            quant_out += [self.forward(inp).detach()]
-        
+        quant_out = self.selfForward()
         ori_out = self.cached_out_features
         
-        # weight_quant = self.weight_quantizer(self.weight)
+        # weight_quant = 
         
         #Calculate Loss(difference between quantized output and original output)
-        loss = 0.0
         # loss = F.mse_loss(weight_quant, self.weight)
-        # loss = (weight_quant - self.weight).abs().pow(2.4).sum(1).mean()
-        for i in range(len(quant_out)):
-            loss += (quant_out[i] - ori_out[i]).abs().pow(2.4).sum(1).mean()
-            loss += F.mse_loss(quant_out[i], ori_out[i])
+        # loss = (self.weight_quantizer(self.weight) - self.weight).abs().pow(3).sum(1).mean().detach().cpu().item()
+        loss = self.getLoss(quant_out, ori_out, p=2.4)
+
         #TODO:Temp
-        self.cached_out_quant_features = quant_out
+        # self.cached_out_quant_features = quant_out
             
-        return loss.detach().cpu().item()
+        return loss
 
     def set_quant_init_state(self):
         self.weight_quantizer.inited = True
@@ -259,8 +260,87 @@ class QuantModule(nn.Module):
     def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
         self.use_weight_quant = weight_quant
         self.use_act_quant = act_quant
+        
     def disable_cache_features(self):
         self.cache_features = False
+    
+    def selfForward(self):
+        quant_out = []
+        for inp in self.cached_inp_features:
+            quant_out += [self.forward(inp).detach()]
+        return quant_out
+    
+    def getLoss(self, A, B, p=2.4):
+        loss = 0.0
+        for i in range(len(B)):
+            loss += (B[i] - A[i]).abs().pow(p).sum(1).mean()
+        return loss.detach().cpu().item()
         
-    # def run_layerGreedy():
+    def run_layerGreedy(self, nc=0):
+        if nc >= self.weight_quantizer.nchannel[0]:
+            return 1e10
+        # quant_out = []
+        # for inp in self.cached_inp_features:
+        #     quant_out += [self.forward(inp).detach()]
         
+        # ori_out = self.cached_out_features
+        n_channel = self.weight_quantizer.nchannel
+        # t  = tqdm(range(n_channel[0]), desc='', position=0, dynamic_ncols=True)
+        # print(f"n_channel: {n_channel}")
+        if not self.selectionInited:
+            self.selection = torch.zeros((n_channel[0], n_channel[1]))
+            self.weight_quantizer.setScale(self.selection)
+            self.minGreedyLoss = (self.weight_quantizer(self.weight) - self.weight).abs().pow(2.4).sum(1).mean().detach().cpu().item()
+            self.selectionInited = True
+            
+        # for nc in t:
+        # for ic in tqdm(range(n_channel[1]), desc='', leave=False, position=1):
+        for ic in range(n_channel[1]):
+            prv = 0
+            for k in range(1, 4):
+                self.selection[nc, ic] = k
+                self.weight_quantizer.setScale(self.selection)
+                # quant_out = self.selfForward()
+                # loss = self.getLoss(quant_out, ori_out)
+                loss = (self.weight_quantizer(self.weight) - self.weight).abs().pow(2.4).sum(1).mean().detach().cpu().item()
+                if loss < self.minGreedyLoss :
+                    self.minGreedyLoss  = loss
+                    prv = k
+                    # t.set_description(f"best {minLoss:.6f} cur {loss:.6f} sel_cnt{sel_cnt}")
+                else:
+                    self.selection[nc, ic] = prv
+        return self.minGreedyLoss 
+
+
+    def run_layerDist(self, nc=0):
+        if nc >= self.weight_quantizer.nchannel[0]:
+            return 1e10 #Default Loss
+        
+        n_channel = self.weight_quantizer.nchannel
+        if not self.selectionInited:
+            self.selection = torch.zeros((n_channel[0], n_channel[1]))
+            self.weight_quantizer.setScale(self.selection)
+            self.selectionInited = True
+            
+        qParam = {0: 1.0, 1:0.5, 2:0.25, 3:0.75}
+        
+        with torch.no_grad():
+            delta = self.weight_quantizer.delta[nc, 0, 0, 0]
+            zero_point = self.weight_quantizer.zero_point[nc, 0, 0, 0]
+            
+            for ic in range(n_channel[1]):
+                minLoss = 1e10
+                minK = 0
+                weight = self.weight[nc, ic, :, :]
+                for k in range(0, 2):
+                    quant_weight = torch.round(weight / (delta/qParam[k]))
+                    quant_weight = torch.clamp(quant_weight + zero_point, 0, self.weight_quantizer.n_levels - 1)
+                    quant_weight = (quant_weight - zero_point) * (delta/qParam[k])
+                    loss = (quant_weight - weight).abs().pow(2.0).sum(1).mean().detach().cpu().item()
+                    if loss < minLoss :
+                        minLoss  = loss
+                        minK = k
+                self.selection[nc, ic] = minK
+                        
+            self.weight_quantizer.setScale(self.selection)
+        return 1e10 #Default Loss
