@@ -81,6 +81,11 @@ class QuantModel(nn.Module):
         for m in self.model.modules():
             if isinstance(m, (QuantModule, BaseQuantBlock)):
                 m.disable_cache_features()
+                
+    def clear_cached_features(self):
+        for m in self.model.modules():
+            if isinstance(m, (QuantModule, BaseQuantBlock)):
+                m.clear_cached_features()
 
     # def synchorize_activation_statistics(self):
     #     import linklink.dist_helper as dist

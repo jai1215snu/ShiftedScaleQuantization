@@ -68,7 +68,7 @@ def build_ShiftedChannelQuantLayer(model, curName, layer, **kwargs):
     qscale = kwargs['qscale']
     layer.weight_quantizer = ChannelQuant(uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data, shuffle_ratio=shuffle_ratio, qscale=qscale)
     layer.use_weight_quant = True
-    layer.cache_features   = True
+    layer.cache_features   = 'none'
     
 def run_layerRandomize(model, curName, layer, **kwargs):
     layer.weight_quantizer.run_layerRandomize()
@@ -301,7 +301,104 @@ def channelRandomizeTest(test_loader, cali_data, args):
         
         # with open(f'./results/channelRandomL0_only_1.2_fixed.{shuffle_ratio}.pkl', 'wb') as f:
         #     pickle.dump(testResult, f)
+
+def run_GreedyLoss(model, curName, layer, **kwargs):
+    layer.run_GreedyLoss()
+
+def channelGreedyTest_wLoss(test_loader, cali_data, args):
+    kwargs = dict(
+        cali_data=cali_data, 
+        iters=args.iters_w, 
+        weight=args.weight, 
+        asym=True,
+        b_range=(args.b_start, args.b_end), 
+        warmup=args.warmup, 
+        act_quant=False, 
+        opt_mode='mse', 
+        eval=True,
+        shuffle_ratio=0, 
+        qscale=1/2, #NOTE: Not Used. should be set on channelQuant
+        returnLoss=True,
+        batch_size=args.batch_size,
+        test_loader=test_loader,
+    )
+    layerEnabled = [
+        '.model.layer1.0.conv1',
+        '.model.layer1.0.conv2',
+        '.model.layer1.1.conv1',
+        '.model.layer1.1.conv2',
+        '.model.layer2.0.conv1',
+        '.model.layer2.0.conv2',
+        '.model.layer2.0.downsample.0',
+        '.model.layer2.1.conv1',
+        '.model.layer2.1.conv2',
+        '.model.layer3.0.conv1',
+        '.model.layer3.0.conv2',
+        '.model.layer3.0.downsample.0',
+        '.model.layer3.1.conv1',
+        '.model.layer3.1.conv2',
+        '.model.layer4.0.conv1',
+        '.model.layer4.0.conv2',
+        '.model.layer4.0.downsample.0',
+        '.model.layer4.1.conv1',
+        '.model.layer4.1.conv2',
+    ]
+    qnn = build_qnn(args)
+    print(f'accuracy of qnn    : {validate_model(test_loader, qnn):.3f}')
+    for layer in layerEnabled:
+        build_ShiftedChannelQuant(qnn, [layer], '', **kwargs) #only one layer
         
+        #Cache input features(with quant state)
+        set_cache_state(qnn, [layer], prv_name='', state='if')
+        for i in range(len(cali_data)//args.batch_size):
+            _ = qnn(cali_data[i*args.batch_size:(i+1)*args.batch_size].to(device))
+            
+        #Cache output features(with quant state)
+        quant_state = store_quant_state(qnn)
+        qnn.set_quant_state(False, False)# For Accuracy test
+        set_cache_state(qnn, [layer], prv_name='', state='of')
+        for i in range(len(cali_data)//args.batch_size):
+            _ = qnn(cali_data[i*args.batch_size:(i+1)*args.batch_size].to(device))
+        restore_quant_state(qnn, quant_state)
+        set_cache_state(qnn, [layer], prv_name='', state='none')
+        
+        #Run Quantization optimization
+        QuantRecursiveRun(qnn, run_GreedyLoss, [layer], '', **kwargs)
+        qnn.clear_cached_features()
+        quant_state = store_quant_state(qnn)
+        qnn.set_quant_state(True, False)# For Accuracy test
+        print(f'accuracy of qnn{layer:28s}    : {validate_model(test_loader, qnn):.3f}')
+        restore_quant_state(qnn, quant_state)
+        
+
+def set_cache_state(model, layers, prv_name='', state='none'):
+    for name, module in model.named_children():
+        curName = prv_name+'.'+name
+        if isinstance(module, QuantModule):
+            if module.ignore_reconstruction is True:
+                continue
+            else:
+                if curName in layers:
+                    module.cache_features = state
+                    print(curName, module.cache_features)
+        else:
+            set_cache_state(module, layers, curName, state)
+
+
+def store_quant_state(model):
+    qState = []
+    for m in model.modules():
+        if isinstance(m, (QuantModule)):
+            qState += [m.use_weight_quant]
+    return qState
+
+def restore_quant_state(model, qState):
+    idx = 0
+    for m in model.modules():
+        if isinstance(m, (QuantModule)):
+            m.use_weight_quant = qState[idx]
+            idx += 1
+
 if __name__ == '__main__':
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     #Ready For Simulation
@@ -312,5 +409,7 @@ if __name__ == '__main__':
     cali_data = get_train_samples(train_loader, num_samples=args.num_samples)
 
     # channelRandomizeTest(test_loader, cali_data, args)
-    channelGreedyTest(test_loader, cali_data, args)
+    # channelGreedyTest(test_loader, cali_data, args)
     # channelDistTest(test_loader, cali_data, args)
+    channelGreedyTest_wLoss(test_loader, cali_data, args)
+    

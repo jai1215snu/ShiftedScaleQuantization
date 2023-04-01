@@ -54,7 +54,6 @@ class ChannelQuant(nn.Module):
         
         return x_float_q
 
-
     # def init_resol(self, prob: float = 0.1):
         # self.simpleScale = torch.randint(0, 2, size=(x.shape[0],), device=x.device)
         # self.simpleScale = torch.pow(2, -self.simpleScale.float()).to(x.device)
@@ -71,15 +70,10 @@ class ChannelQuant(nn.Module):
         self.simpleScale = (torch.ones_like(self.simpleScale) - (self.simpleScale.float() * (1-self.qscale))).to(self.device)
         
     def setScale(self, selected):
-        mask = (selected == 0)
-        self.shiftedScale[mask] = 1.0
-        mask = (selected == 1)
-        self.shiftedScale[mask] = 0.5
-        mask = (selected == 2)
-        self.shiftedScale[mask] = 0.75
-        mask = (selected == 3)
-        self.shiftedScale[mask] = 1.25
-        # self.shiftedScale[~mask] = self.qscale
+        quantLevel = [1.0, 4/8, 2/8, 6/8, 3/8, 5/8, 7/8, 9/8]
+        for i in range(8):
+            self.shiftedScale[(selected == i)] = quantLevel[i]
+                
         
     def run_layerRandomize(self):
         randomValue = torch.multinomial(torch.tensor([1-self.shuffle_ratio, self.shuffle_ratio]), num_samples=self.nchannel[0]*self.nchannel[1], replacement=True)
