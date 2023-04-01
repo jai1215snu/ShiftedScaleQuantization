@@ -74,7 +74,6 @@ class ChannelQuant(nn.Module):
         for i in range(8):
             self.shiftedScale[(selected == i)] = quantLevel[i]
                 
-        
     def run_layerRandomize(self):
         randomValue = torch.multinomial(torch.tensor([1-self.shuffle_ratio, self.shuffle_ratio]), num_samples=self.nchannel[0]*self.nchannel[1], replacement=True)
         randomValue = randomValue.reshape(self.nchannel[0], self.nchannel[1])

@@ -9,6 +9,7 @@ from quant.channelQuant import ChannelQuant
 from myData_Utils import save_inp_oup_data
 import pandas as pd
 import pickle
+import telegram
 
 
 def build_qnn(args):
@@ -46,6 +47,8 @@ def build_ShiftedChannelQuant(model: nn.Module, layerEnabled, prv_name="", **kwa
             else:
                 if curName in layerEnabled:
                     build_ShiftedChannelQuantLayer(model, curName, module, **kwargs)
+                else:
+                    print(curName, type(module.weight_quantizer))
         else:
             build_ShiftedChannelQuant(module, layerEnabled, curName, **kwargs)
 
@@ -304,8 +307,12 @@ def channelRandomizeTest(test_loader, cali_data, args):
 
 def run_GreedyLoss(model, curName, layer, **kwargs):
     layer.run_GreedyLoss()
+    #Dump Current shifted Scale.
+    with open(f'./temp/greedyLoss/{curName}.pkl', 'wb') as f:
+        pickle.dump(layer.weight_quantizer.shiftedScale, f)
 
-def channelGreedyTest_wLoss(test_loader, cali_data, args):
+
+def channelGreedyTest_wLoss(test_loader, cali_data, botInfo, args):
     kwargs = dict(
         cali_data=cali_data, 
         iters=args.iters_w, 
@@ -345,8 +352,13 @@ def channelGreedyTest_wLoss(test_loader, cali_data, args):
     ]
     qnn = build_qnn(args)
     print(f'accuracy of qnn    : {validate_model(test_loader, qnn):.3f}')
+    bot = telegram.Bot(token=botInfo['token'])
+    # bot.sendMessage(chat_id=botInfo['id'], text='Starting GreedyTest with Loss')
+    build_ShiftedChannelQuant(qnn, layerEnabled, '', **kwargs) #only one layer
+    qnn.set_quant_state(False, False)# Default Setting
+    
     for layer in layerEnabled:
-        build_ShiftedChannelQuant(qnn, [layer], '', **kwargs) #only one layer
+        # build_ShiftedChannelQuant(qnn, [layer], '', **kwargs) #only one layer
         
         #Cache input features(with quant state)
         set_cache_state(qnn, [layer], prv_name='', state='if')
@@ -363,12 +375,28 @@ def channelGreedyTest_wLoss(test_loader, cali_data, args):
         set_cache_state(qnn, [layer], prv_name='', state='none')
         
         #Run Quantization optimization
+        set_weight_quant(qnn, [layer], '', True)
         QuantRecursiveRun(qnn, run_GreedyLoss, [layer], '', **kwargs)
         qnn.clear_cached_features()
         quant_state = store_quant_state(qnn)
         qnn.set_quant_state(True, False)# For Accuracy test
-        print(f'accuracy of qnn{layer:28s}    : {validate_model(test_loader, qnn):.3f}')
+        result_message = f'accuracy of qnn{layer:28s}    : {validate_model(test_loader, qnn):.3f}'
+        print(result_message)
+        bot.sendMessage(chat_id=botInfo['id'], text=result_message)
         restore_quant_state(qnn, quant_state)
+        
+
+def set_weight_quant(model, layers, prv_name='', state=False):
+    for name, module in model.named_children():
+        curName = prv_name+'.'+name
+        if isinstance(module, QuantModule):
+            if module.ignore_reconstruction is True:
+                continue
+            else:
+                if curName in layers:
+                    module.use_weight_quant = state
+        else:
+            set_weight_quant(module, layers, curName, state)
         
 
 def set_cache_state(model, layers, prv_name='', state='none'):
@@ -380,7 +408,6 @@ def set_cache_state(model, layers, prv_name='', state='none'):
             else:
                 if curName in layers:
                     module.cache_features = state
-                    print(curName, module.cache_features)
         else:
             set_cache_state(module, layers, curName, state)
 
@@ -407,9 +434,13 @@ if __name__ == '__main__':
     train_loader, test_loader = build_cifar10_data(batch_size=args.batch_size, workers=args.workers,
                                                     data_path=args.data_path)
     cali_data = get_train_samples(train_loader, num_samples=args.num_samples)
+    
+    #Telegram Bot setting.
+    
+    botInfo = {'token':'5820626937:AAHHsvT__T7xkCiLujwi799CyMoWtwNkbTM', 'id':'5955354823'}
 
     # channelRandomizeTest(test_loader, cali_data, args)
     # channelGreedyTest(test_loader, cali_data, args)
     # channelDistTest(test_loader, cali_data, args)
-    channelGreedyTest_wLoss(test_loader, cali_data, args)
+    channelGreedyTest_wLoss(test_loader, cali_data, botInfo, args)
     
