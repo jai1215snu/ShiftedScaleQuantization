@@ -47,8 +47,6 @@ def build_ShiftedChannelQuant(model: nn.Module, layerEnabled, prv_name="", **kwa
             else:
                 if curName in layerEnabled:
                     build_ShiftedChannelQuantLayer(model, curName, module, **kwargs)
-                else:
-                    print(curName, type(module.weight_quantizer))
         else:
             build_ShiftedChannelQuant(module, layerEnabled, curName, **kwargs)
 

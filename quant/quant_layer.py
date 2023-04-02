@@ -363,8 +363,8 @@ class QuantModule(nn.Module):
             quant_out = []
             for inp in cached_inp:
                 quant_out += [self.forward(inp).detach()]
-            # self.minGreedyLoss = self.getLoss(cached_out, quant_out)
-            self.minGreedyLoss = 1e10
+            self.minGreedyLoss = self.getLoss(cached_out, quant_out)
+            # self.minGreedyLoss = 1e10
             self.selectionInited = True
         
         initialLoss = self.minGreedyLoss
@@ -372,16 +372,15 @@ class QuantModule(nn.Module):
         for nc in t:
             for ic in range(n_channel[1]):
                 minK = 0
-                self.minGreedyLoss = 1e10
-                for k in range(0, 2):
+                for k in range(1, 2):
                     self.selection[nc, ic] = k
                     self.weight_quantizer.setScale(self.selection)
                     
-                    # quant_out = []
-                    # for inp in self.cached_inp_features:
-                    #     quant_out += [self.forward(inp).detach()]
-                    # loss = self.getLoss(cached_out, quant_out)
-                    loss = (self.weight_quantizer(self.weight) - self.weight).abs().pow(2.4).sum(1).mean().detach().cpu().item()
+                    quant_out = []
+                    for inp in self.cached_inp_features:
+                        quant_out += [self.forward(inp).detach()]
+                    loss = self.getLoss(cached_out, quant_out)
+                    # loss = (self.weight_quantizer(self.weight) - self.weight).abs().pow(2.4).sum(1).mean().detach().cpu().item()
                     
                     if loss < self.minGreedyLoss :
                         self.minGreedyLoss  = loss
