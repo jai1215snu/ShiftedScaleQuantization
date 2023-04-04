@@ -208,8 +208,10 @@ class QuantModule(nn.Module):
         self.cached_out_features = []
         self.cached_out_quant_features = []
         
-        self.selectionInited = False
         self.selection = None # for greedy selection
+        
+        self.selectionInited = False
+
 
 
     def forward(self, input: torch.Tensor):
@@ -348,9 +350,75 @@ class QuantModule(nn.Module):
                 self.selection[nc, ic] = minK
             self.weight_quantizer.setScale(self.selection)
         return 1e10 #Default Loss
+
+    def selection_init(self):
+        n_channel = self.weight_quantizer.nchannel
+        self.selection = torch.zeros((n_channel[0], n_channel[1]))
+        self.weight_quantizer.setScale(self.selection)
+        self.selectionInited = True
     
+    def restore_selection(self):
+        sel = self.selection
+        scale = self.weight_quantizer.shiftedScale
+        for nc in range(sel.shape[0]):
+            for ic in range(sel.shape[1]):
+                sel[nc, ic] = 0 if scale[nc, ic, 0, 0] == 1.0 else 1
+        self.weight_quantizer.setScale(self.selection)
+        
     @torch.no_grad()
-    def run_GreedyLoss(self):
+    def run_GreedyLoss(self, useWeight=False):
+        cached_inp = self.cached_inp_features
+        cached_out = self.cached_out_features
+        
+        n_channel = self.weight_quantizer.nchannel
+        if not self.selectionInited:
+            self.selection_init()
+            
+        #Run and Calculate Loss
+        quant_out = []
+        for inp in cached_inp:
+            quant_out += [self.forward(inp).detach()]
+        if useWeight:
+            self.minGreedyLoss = 1e10
+        else:
+            self.minGreedyLoss = self.getLoss(cached_out, quant_out)
+        
+        for _ in range(1): # dobule greedy optimization
+            initialLoss = self.minGreedyLoss
+            t = tqdm(range(n_channel[0]), desc='', dynamic_ncols=True)
+            for nc in t:
+                for ic in range(n_channel[1]):
+                    minK = self.selection[nc, ic].item()
+                    if useWeight:
+                        self.minGreedyLoss = 1e10
+                    rng = range(0, 2)
+                    for k in rng:
+                        if k == minK:
+                            continue
+                        self.selection[nc, ic] = k
+                        self.weight_quantizer.setScale(self.selection)
+                        
+                        if useWeight:
+                            loss = (self.weight_quantizer(self.weight) - self.weight).abs().pow(2.4).sum(1).mean().detach().cpu().item()
+                        else:
+                            quant_out = []
+                            for inp in self.cached_inp_features:
+                                quant_out += [self.forward(inp).detach()]
+                            loss = self.getLoss(cached_out, quant_out)
+                        
+                        if loss < self.minGreedyLoss :
+                            self.minGreedyLoss  = loss
+                            minK = k
+                    self.selection[nc, ic] = minK
+                    self.weight_quantizer.setScale(self.selection)
+                t.set_description(f"Loss {initialLoss:.5f}->{self.minGreedyLoss:.5f}")
+            count_nonzero = torch.count_nonzero(self.selection)
+            total_elements = self.selection.numel()
+            ratio = count_nonzero / total_elements
+            print(f"{ratio*100:.3f}% of the selections are 1/2 scale")
+
+    @torch.no_grad()
+    def run_GreedyLossSorted(self, useWeight=False):
         cached_inp = self.cached_inp_features
         cached_out = self.cached_out_features
         
@@ -363,24 +431,55 @@ class QuantModule(nn.Module):
             quant_out = []
             for inp in cached_inp:
                 quant_out += [self.forward(inp).detach()]
-            self.minGreedyLoss = self.getLoss(cached_out, quant_out)
-            # self.minGreedyLoss = 1e10
+            if useWeight:
+                self.minGreedyLoss = 1e10
+            else:
+                self.minGreedyLoss = self.getLoss(cached_out, quant_out)
             self.selectionInited = True
         
+        
         initialLoss = self.minGreedyLoss
+        
+        #Calculate Loss Matrix
+        lossMatrix = torch.zeros((n_channel[0], n_channel[1]))
+        t = tqdm(range(n_channel[0]), desc='Loss Matrix', dynamic_ncols=True)
+        for nc in t:
+            for ic in range(n_channel[1]):
+                sel = torch.zeros((n_channel[0], n_channel[1]))
+                sel[nc, ic] = 1
+                self.weight_quantizer.setScale(sel)
+                quant_out = []
+                for inp in self.cached_inp_features:
+                    quant_out += [self.forward(inp).detach()]
+                loss = self.getLoss(cached_out, quant_out)
+                lossMatrix[nc, ic] = loss
+                
+        flattened_arr = lossMatrix.detach().cpu().numpy().flatten()
+        argsorted = np.argsort(flattened_arr)
+        sorted_row_indices, sorted_col_indices = np.unravel_index(argsorted, lossMatrix.shape)
+        
         t = tqdm(range(n_channel[0]), desc='', dynamic_ncols=True)
         for nc in t:
             for ic in range(n_channel[1]):
+                nc = sorted_row_indices[nc]
+                ic = sorted_col_indices[ic]
                 minK = 0
-                for k in range(1, 2):
+                if useWeight:
+                    self.minGreedyLoss = 1e10
+                    rng = range(0, 2)
+                else:
+                    rng = range(1, 2)
+                for k in rng:
                     self.selection[nc, ic] = k
                     self.weight_quantizer.setScale(self.selection)
                     
-                    quant_out = []
-                    for inp in self.cached_inp_features:
-                        quant_out += [self.forward(inp).detach()]
-                    loss = self.getLoss(cached_out, quant_out)
-                    # loss = (self.weight_quantizer(self.weight) - self.weight).abs().pow(2.4).sum(1).mean().detach().cpu().item()
+                    if useWeight:
+                        loss = (self.weight_quantizer(self.weight) - self.weight).abs().pow(2.4).sum(1).mean().detach().cpu().item()
+                    else:
+                        quant_out = []
+                        for inp in self.cached_inp_features:
+                            quant_out += [self.forward(inp).detach()]
+                        loss = self.getLoss(cached_out, quant_out)
                     
                     if loss < self.minGreedyLoss :
                         self.minGreedyLoss  = loss
@@ -388,7 +487,3 @@ class QuantModule(nn.Module):
                 self.selection[nc, ic] = minK
                 self.weight_quantizer.setScale(self.selection)
             t.set_description(f"Loss {initialLoss:.5f}->{self.minGreedyLoss:.5f}")
-                
-                
-                
-                        
