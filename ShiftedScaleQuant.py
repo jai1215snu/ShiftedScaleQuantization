@@ -80,14 +80,14 @@ def channelGreedyTest_wLoss(test_loader, cali_data, botInfo, args):
     #NOTE: Temporal code for test
     for layer in layerEnabled+layerWeightGreedy:
         set_weight_quant(qnn, [layer], '', True)
-        restore_ShiftedChannelQuant(qnn, [layer], '', './temp/greedyLoss/greedy_loss_L3')
+        restore_ShiftedChannelQuant(qnn, [layer], '', './temp/greedyLoss/greedy_loss_L4')
         quant_state = store_quant_state(qnn)
         qnn.set_quant_state(True, False)# For Accuracy test
         result_message = f'accuracy of qnn{layer:28s}    : {validate_model(test_loader, qnn):.3f}'
         print(result_message)
         restore_quant_state(qnn, quant_state)
         
-        
+    exit(1)
     for layer in layerEnabled+layerWeightGreedy:
         #Cache input features(with quant state)
         set_cache_state(qnn, [layer], prv_name='', state='if')

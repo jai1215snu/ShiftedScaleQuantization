@@ -24,6 +24,8 @@ class ChannelQuant(nn.Module):
         
         self.shuffle_ratio = shuffle_ratio
         
+        # self.init_v()
+        
 
         # params for sigmoid function
         # self.init_resol(prob=shuffle_ratio)
@@ -78,3 +80,5 @@ class ChannelQuant(nn.Module):
         randomValue = torch.multinomial(torch.tensor([1-self.shuffle_ratio, self.shuffle_ratio]), num_samples=self.nchannel[0]*self.nchannel[1], replacement=True)
         randomValue = randomValue.reshape(self.nchannel[0], self.nchannel[1])
         self.setScale(randomValue)
+    
+    # def init_v(self):
