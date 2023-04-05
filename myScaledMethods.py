@@ -9,9 +9,7 @@ from tqdm import tqdm
 from common import *
 
 def build_ShiftedChannelQuantLayer(model, curName, layer, **kwargs):
-    shuffle_ratio = kwargs['shuffle_ratio']
-    qscale = kwargs['qscale']
-    layer.weight_quantizer = ChannelQuant(uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data, shuffle_ratio=shuffle_ratio, qscale=qscale)
+    layer.weight_quantizer = ChannelQuant(uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data)
     layer.use_weight_quant = True
     layer.cache_features   = 'none'
     
@@ -108,7 +106,6 @@ def channelDistTest(test_loader, cali_data, args):
         act_quant=False, 
         opt_mode='mse', 
         eval=True,
-        shuffle_ratio=0, 
         qscale=1/2,
         returnLoss=True,
         batch_size=args.batch_size,
@@ -172,7 +169,6 @@ def channelRandomizeTest(test_loader, cali_data, args):
         act_quant=False, 
         opt_mode='mse', 
         eval=True,
-        shuffle_ratio=0, 
         qscale=1/2,
         returnLoss=True,
         batch_size=args.batch_size

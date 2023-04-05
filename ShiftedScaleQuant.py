@@ -4,7 +4,7 @@ from quant.quant_layer import QuantModule
 import telegram
 import pickle
 from myScaledMethods import *
-
+from quant.layer_recon_shiftedScale import *
 
 def restore_ShiftedChannelQuant(model, layers, prv_name='', path='./temp/greedyLoss'):
     for name, module in model.named_children():
@@ -28,8 +28,15 @@ def run_GreedyLoss(model, curName, layer, **kwargs):
     #Dump Current shifted Scale.
     with open(f'./temp/greedyLoss/{curName}.pkl', 'wb') as f:
         pickle.dump(layer.weight_quantizer.shiftedScale, f)
-
-def channelGreedyTest_wLoss(test_loader, cali_data, botInfo, args):
+        
+def run_ShiftRecon(model, curName, layer, **kwargs):
+    lmda = kwargs['lmda']
+    layer_recon_shiftedScale(layer, 1200, lmda)
+                
+def toggle_hardTarget(model, curName, layer, **kwargs):
+    layer.weight_quantizer.hard_targets = not layer.weight_quantizer.hard_targets
+    
+def channelShift_wLoss(test_loader, cali_data, botInfo, lmda, args):
     kwargs = dict(
         cali_data=cali_data, 
         iters=args.iters_w, 
@@ -40,8 +47,6 @@ def channelGreedyTest_wLoss(test_loader, cali_data, botInfo, args):
         act_quant=False, 
         opt_mode='mse', 
         eval=True,
-        shuffle_ratio=0, 
-        qscale=1/2, #NOTE: Not Used. should be set on channelQuant
         returnLoss=True,
         batch_size=args.batch_size,
         test_loader=test_loader,
@@ -55,9 +60,86 @@ def channelGreedyTest_wLoss(test_loader, cali_data, botInfo, args):
         '.model.layer2.0.conv2',
         '.model.layer2.0.downsample.0',
         '.model.layer2.1.conv1',
+        '.model.layer2.1.conv2',
+        '.model.layer3.0.conv1',
+        '.model.layer3.0.conv2',
+        '.model.layer3.0.downsample.0',
+        '.model.layer3.1.conv1',
+        '.model.layer3.1.conv2',
+        '.model.layer4.0.conv1',
+        '.model.layer4.0.conv2',
+        '.model.layer4.0.downsample.0',
+        '.model.layer4.1.conv1',
+        '.model.layer4.1.conv2',
     ]
+    qnn = build_qnn(args, test_loader)
+    print(f'accuracy of qnn    : {validate_model(test_loader, qnn):.3f}')
+    bot = telegram.Bot(token=botInfo['token'])
+    bot.sendMessage(chat_id=botInfo['id'], text=f'Starting with {lmda}')
+    build_ShiftedChannelQuant(qnn, layerEnabled, '', **kwargs) #only one layer
+    qnn.set_quant_state(False, False)# Default Setting
     
-    layerWeightGreedy = [
+    accuracys = []
+    for layer in layerEnabled:
+        #Cache input features(with quant state)
+        set_cache_state(qnn, [layer], prv_name='', state='if')
+        for i in range(len(cali_data)//args.batch_size):
+            _ = qnn(cali_data[i*args.batch_size:(i+1)*args.batch_size].to(device))
+            
+        #Cache output features(with quant state)
+        quant_state = store_quant_state(qnn)
+        qnn.set_quant_state(False, False)# For Accuracy test
+        set_cache_state(qnn, [layer], prv_name='', state='of')
+        for i in range(len(cali_data)//args.batch_size):
+            _ = qnn(cali_data[i*args.batch_size:(i+1)*args.batch_size].to(device))
+        restore_quant_state(qnn, quant_state)
+        set_cache_state(qnn, [layer], prv_name='', state='none')
+        
+        #Run Quantization optimization
+        set_weight_quant(qnn, [layer], '', True)
+        kwargs['lmda'] = lmda
+        QuantRecursiveRun(qnn, run_ShiftRecon, [layer], '', **kwargs)
+        qnn.clear_cached_features()
+        quant_state = store_quant_state(qnn)
+        qnn.set_quant_state(True, False)# For Accuracy test
+        QuantRecursiveRun(qnn, toggle_hardTarget, [layer], '', **kwargs)
+        result_message = f'accuracy of qnn_soft{layer:28s}    : {validate_model(test_loader, qnn):.3f}'
+        print(result_message)
+        bot.sendMessage(chat_id=botInfo['id'], text=result_message)
+        QuantRecursiveRun(qnn, toggle_hardTarget, [layer], '', **kwargs)
+        
+        accuracys += [validate_model(test_loader, qnn)]
+        result_message = f'accuracy of qnn_hard{layer:28s}    : {validate_model(test_loader, qnn):.3f}'
+        print(result_message)
+        bot.sendMessage(chat_id=botInfo['id'], text=result_message)
+        restore_quant_state(qnn, quant_state)
+    with open(f'./temp/accuracy_{lmda}.pkl', 'wb') as f:
+        pickle.dump(accuracys, f)
+
+def channelGreedyTest_wLoss(test_loader, cali_data, botInfo, args):
+    kwargs = dict(
+        cali_data=cali_data, 
+        iters=args.iters_w, 
+        weight=args.weight, 
+        asym=True,
+        b_range=(args.b_start, args.b_end), 
+        warmup=args.warmup, 
+        act_quant=False, 
+        opt_mode='mse', 
+        eval=True,
+        returnLoss=True,
+        batch_size=args.batch_size,
+        test_loader=test_loader,
+    )
+    layerEnabled = [
+        '.model.layer1.0.conv1',
+        '.model.layer1.0.conv2',
+        '.model.layer1.1.conv1',
+        '.model.layer1.1.conv2',
+        '.model.layer2.0.conv1',
+        '.model.layer2.0.conv2',
+        '.model.layer2.0.downsample.0',
+        '.model.layer2.1.conv1',
         '.model.layer2.1.conv2',
         '.model.layer3.0.conv1',
         '.model.layer3.0.conv2',
@@ -74,21 +156,20 @@ def channelGreedyTest_wLoss(test_loader, cali_data, botInfo, args):
     print(f'accuracy of qnn    : {validate_model(test_loader, qnn):.3f}')
     bot = telegram.Bot(token=botInfo['token'])
     # bot.sendMessage(chat_id=botInfo['id'], text='Starting GreedyTest with Loss')
-    build_ShiftedChannelQuant(qnn, layerEnabled+layerWeightGreedy, '', **kwargs) #only one layer
+    build_ShiftedChannelQuant(qnn, layerEnabled, '', **kwargs) #only one layer
     qnn.set_quant_state(False, False)# Default Setting
     
-    #NOTE: Temporal code for test
-    for layer in layerEnabled+layerWeightGreedy:
-        set_weight_quant(qnn, [layer], '', True)
-        restore_ShiftedChannelQuant(qnn, [layer], '', './temp/greedyLoss/greedy_loss_L4')
-        quant_state = store_quant_state(qnn)
-        qnn.set_quant_state(True, False)# For Accuracy test
-        result_message = f'accuracy of qnn{layer:28s}    : {validate_model(test_loader, qnn):.3f}'
-        print(result_message)
-        restore_quant_state(qnn, quant_state)
+    # #NOTE: Temporal code for test
+    # for layer in layerEnabled:
+    #     set_weight_quant(qnn, [layer], '', True)
+    #     restore_ShiftedChannelQuant(qnn, [layer], '', './temp/greedyLoss/greedy_loss_L4')
+    #     quant_state = store_quant_state(qnn)
+    #     qnn.set_quant_state(True, False)# For Accuracy test
+    #     result_message = f'accuracy of qnn{layer:28s}    : {validate_model(test_loader, qnn):.3f}'
+    #     print(result_message)
+    #     restore_quant_state(qnn, quant_state)
         
-    exit(1)
-    for layer in layerEnabled+layerWeightGreedy:
+    for layer in layerEnabled:
         #Cache input features(with quant state)
         set_cache_state(qnn, [layer], prv_name='', state='if')
         for i in range(len(cali_data)//args.batch_size):
@@ -155,5 +236,8 @@ if __name__ == '__main__':
     # channelRandomizeTest(test_loader, cali_data, args)
     # channelGreedyTest(test_loader, cali_data, args)
     # channelDistTest(test_loader, cali_data, args)
-    channelGreedyTest_wLoss(test_loader, cali_data, botInfo, args)
+    # channelGreedyTest_wLoss(test_loader, cali_data, botInfo, args)
+    for i in range(10):
+        lmda = 0.0001 / (10)**i
+        channelShift_wLoss(test_loader, cali_data, botInfo, lmda, args)
     
