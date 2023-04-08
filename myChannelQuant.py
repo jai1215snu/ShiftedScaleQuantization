@@ -166,7 +166,6 @@ def dumpResol(qnn, filename):
     searchResol(qnn, data, '')
     with open(filename, 'wb') as f:
         pickle.dump(data, f)
-    
 
 def extractWeights(qnn, filename):
     data = {}

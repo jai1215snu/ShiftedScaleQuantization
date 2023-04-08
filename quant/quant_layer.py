@@ -45,7 +45,7 @@ class UniformAffineQuantizer(nn.Module):
     :param scale_method: determines the quantization scale and zero point
     """
     def __init__(self, n_bits: int = 8, symmetric: bool = False, channel_wise: bool = False, scale_method: str = 'max',
-                 leaf_param: bool = False, CWQ: bool = False, ch: int = 64):
+                 leaf_param: bool = False, tune_delta_zero: bool = False, ch: int = 64):
         super(UniformAffineQuantizer, self).__init__()
         self.sym = symmetric
         assert 2 <= n_bits <= 8, 'bitwidth not supported'
@@ -58,9 +58,11 @@ class UniformAffineQuantizer(nn.Module):
         self.channel_wise = channel_wise
         self.scale_method = scale_method
         
-        #NOTE: Remove this if you want to QUANT_INIT(save torch)
-        if CWQ:
-            if len(ch) == 2:
+        if not tune_delta_zero:
+            if type(ch) is int:
+                self.delta = torch.nn.Parameter(torch.zeros(size=(ch,1)))
+                self.zero_point = torch.nn.Parameter(torch.zeros(size=(ch,1)))
+            elif len(ch) == 2:
                 self.delta = torch.nn.Parameter(torch.zeros(size=(ch[0],1)))
                 self.zero_point = torch.nn.Parameter(torch.zeros(size=(ch[0],1)))
             else:
@@ -73,7 +75,7 @@ class UniformAffineQuantizer(nn.Module):
             if self.leaf_param:
                 delta, self.zero_point = self.init_quantization_scale(x, self.channel_wise)
                 self.delta = torch.nn.Parameter(delta)
-                # self.zero_point = torch.nn.Parameter(self.zero_point)
+                self.zero_point = torch.nn.Parameter(self.zero_point)
             else:
                 self.delta, self.zero_point = self.init_quantization_scale(x, self.channel_wise)
             
@@ -211,8 +213,7 @@ class QuantModule(nn.Module):
         self.selection = None # for greedy selection
         
         self.selectionInited = False
-
-
+        self.pathName = ''
 
     def forward(self, input: torch.Tensor):
         if self.cache_features == 'if':
@@ -225,19 +226,22 @@ class QuantModule(nn.Module):
             weight = self.org_weight
             bias = self.org_bias
             
-
         out = self.fwd_func(input, weight, bias, **self.fwd_kwargs)
 
         if self.se_module is not None:
             out = self.se_module(out)
+            
+        # if self.cache_features == 'if':
+        #     print(out[0][1])
         out = self.activation_function(out)
-        if self.disable_act_quant:
-            return out
-        if self.use_act_quant:
-            out = self.act_quantizer(out)
+
+        if not self.disable_act_quant:
+            if self.use_act_quant:
+                out = self.act_quantizer(out)
             
         if self.cache_features == 'of':
             self.cached_out_features += [out.clone().detach()]
+            
         return out
     
     def cal_quantLoss(self):

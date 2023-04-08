@@ -6,6 +6,7 @@ import pandas as pd
 from pretrained.PyTorch_CIFAR10.cifar10_models.resnet import resnet18
 from quant.channelQuant import ChannelQuant
 from tqdm import tqdm
+import telegram
 from common import *
 
 def build_ShiftedChannelQuantLayer(model, curName, layer, **kwargs):
@@ -25,20 +26,158 @@ def build_ShiftedChannelQuant(model: nn.Module, layerEnabled, prv_name="", **kwa
         else:
             build_ShiftedChannelQuant(module, layerEnabled, curName, **kwargs)
 
-def store_quant_state(model):
-    qState = []
-    for m in model.modules():
-        if isinstance(m, (QuantModule)):
-            qState += [m.use_weight_quant]
-    return qState
+# def store_quant_state(model):
+#     qState = []
+#     for m in model.modules():
+#         if isinstance(m, (QuantModule)):
+#             qState += [m.use_weight_quant]
+#     return qState
 
-def restore_quant_state(model, qState):
-    idx = 0
-    for m in model.modules():
-        if isinstance(m, (QuantModule)):
-            m.use_weight_quant = qState[idx]
-            idx += 1
+# def restore_quant_state(model, qState):
+#     idx = 0
+#     for m in model.modules():
+#         if isinstance(m, (QuantModule)):
+#             m.use_weight_quant = qState[idx]
+#             idx += 1
+            
+def set_weight_quant(model, layers, prv_name='', state=False):
+    for name, module in model.named_children():
+        curName = prv_name+'.'+name
+        if isinstance(module, QuantModule):
+            if module.ignore_reconstruction is True:
+                continue
+            else:
+                if curName in layers:
+                    module.use_weight_quant = state
+        else:
+            set_weight_quant(module, layers, curName, state)
+        
 
+def set_cache_state(model, layers, prv_name='', state='none'):
+    for name, module in model.named_children():
+        curName = prv_name+'.'+name
+        if isinstance(module, QuantModule):
+            if module.ignore_reconstruction is True:
+                continue
+            else:
+                if curName in layers:
+                    module.cache_features = state
+        else:
+            set_cache_state(module, layers, curName, state)            
+
+def channelGreedyTest_wLoss(test_loader, cali_data, botInfo, args):
+    kwargs = dict(
+        cali_data=cali_data, 
+        iters=args.iters_w, 
+        weight=args.weight, 
+        asym=True,
+        b_range=(args.b_start, args.b_end), 
+        warmup=args.warmup, 
+        act_quant=False, 
+        opt_mode='mse', 
+        eval=True,
+        returnLoss=True,
+        batch_size=args.batch_size,
+        test_loader=test_loader,
+    )
+    layerEnabled = [
+        '.model.layer1.0.conv1',
+        '.model.layer1.0.conv2',
+        '.model.layer1.1.conv1',
+        '.model.layer1.1.conv2',
+        '.model.layer2.0.conv1',
+        '.model.layer2.0.conv2',
+        '.model.layer2.0.downsample.0',
+        '.model.layer2.1.conv1',
+        '.model.layer2.1.conv2',
+        '.model.layer3.0.conv1',
+        '.model.layer3.0.conv2',
+        '.model.layer3.0.downsample.0',
+        '.model.layer3.1.conv1',
+        '.model.layer3.1.conv2',
+        '.model.layer4.0.conv1',
+        '.model.layer4.0.conv2',
+        '.model.layer4.0.downsample.0',
+        '.model.layer4.1.conv1',
+        '.model.layer4.1.conv2',
+    ]
+    qnn = build_qnn(args, test_loader)
+    bot = telegram.Bot(token=botInfo['token'])
+    # bot.sendMessage(chat_id=botInfo['id'], text='Starting GreedyTest with Loss')
+    build_ShiftedChannelQuant(qnn, layerEnabled, '', **kwargs) #only one layer
+    qnn.set_quant_state(False, False)# Default Setting
+    
+    # #NOTE: Temporal code for test
+    # for layer in layerEnabled:
+    #     set_weight_quant(qnn, [layer], '', True)
+    #     restore_ShiftedChannelQuant(qnn, [layer], '', './temp/greedyLoss/greedy_loss_L4')
+    #     quant_state = store_quant_state(qnn)
+    #     qnn.set_quant_state(True, False)# For Accuracy test
+    #     result_message = f'accuracy of qnn{layer:28s}    : {validate_model(test_loader, qnn):.3f}'
+    #     print(result_message)
+    #     restore_quant_state(qnn, quant_state)
+        
+    for layer in layerEnabled:
+        #Cache input features(with quant state)
+        set_cache_state(qnn, [layer], prv_name='', state='if')
+        for i in range(len(cali_data)//args.batch_size):
+            _ = qnn(cali_data[i*args.batch_size:(i+1)*args.batch_size].to(device))
+            
+        #Cache output features(with quant state)
+        quant_state = store_quant_state(qnn)
+        qnn.set_quant_state(False, False)# For Accuracy test
+        set_cache_state(qnn, [layer], prv_name='', state='of')
+        for i in range(len(cali_data)//args.batch_size):
+            _ = qnn(cali_data[i*args.batch_size:(i+1)*args.batch_size].to(device))
+        restore_quant_state(qnn, quant_state)
+        set_cache_state(qnn, [layer], prv_name='', state='none')
+        
+        #Run Quantization optimization
+        set_weight_quant(qnn, [layer], '', True)
+        QuantRecursiveRun(qnn, run_GreedyLoss, [layer], '', **kwargs) #Main Function
+        qnn.clear_cached_features()
+        quant_state = store_quant_state(qnn)
+        qnn.set_quant_state(True, False)# For Accuracy test
+        result_message = f'accuracy of qnn{layer:28s}    : {validate_model(test_loader, qnn):.3f}'
+        print(result_message)
+        bot.sendMessage(chat_id=botInfo['id'], text=result_message)
+        restore_quant_state(qnn, quant_state)
+
+def run_GreedyLoss(model, curName, layer, **kwargs):
+    layer.run_GreedyLoss()
+    # layer.run_GreedyLossSorted()
+    #Dump Current shifted Scale.
+    with open(f'./temp/greedyLoss/{curName}.pkl', 'wb') as f:
+        pickle.dump(layer.weight_quantizer.shiftedScale, f)
+        
+def init_delta_zero(args, cali_data, test_loader):
+    cnn = resnet18(pretrained=True, device='cuda:0')
+    cnn.cuda()
+    cnn.eval()
+    if not args.skip_test:
+        print(f'accuracy of original : {validate_model(test_loader, cnn):.3f}')
+    
+    # build quantization parameters
+    wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'tune_delta_zero':True, 'leaf_param':True} #NOTE: tune_delta_zero is True
+    aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'leaf_param': args.act_quant}
+    qnn = QuantModel(model=cnn, weight_quant_params=wq_params, act_quant_params=aq_params)
+    qnn.cuda()
+    qnn.eval()
+    if not args.disable_8bit_head_stem:
+        print('Setting the first and the last layer to 8-bit')
+        qnn.set_first_last_layer_to_8bit()
+    qnn.set_quant_state(True, False)# For weight scale/zp initialization
+    _ = qnn(cali_data[:64].to('cuda:0'))
+    
+    params_dict = {}
+    for name, param in qnn.named_parameters():
+        print("torch saving ", name)
+        params_dict[name] = param.data
+
+    # Save the parameters dictionary
+    torch.save(params_dict, f'./QNN_CW_W{args.n_bits_w}_FP32.pth')
+    
+    
 def build_qnn(args, test_loader):
     cnn = resnet18(pretrained=True, device='cuda:0')
     cnn.cuda()
@@ -47,7 +186,7 @@ def build_qnn(args, test_loader):
         print(f'accuracy of original : {validate_model(test_loader, cnn):.3f}')
     
     # build quantization parameters
-    wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'CWQ':True}
+    wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'tune_delta_zero':False}
     aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'leaf_param': args.act_quant}
     qnn = QuantModel(model=cnn, weight_quant_params=wq_params, act_quant_params=aq_params)
     qnn.cuda()
@@ -173,8 +312,6 @@ def channelRandomizeTest(test_loader, cali_data, args):
         returnLoss=True,
         batch_size=args.batch_size
     )
-    
-    # if not args.skip_test:
     
     for shuffle_ratio in ratio:
         bestResult = 0.0

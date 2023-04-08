@@ -1,47 +1,61 @@
 import torch
 from quant.quant_layer import QuantModule, StraightThrough, lp_loss
+import torch.distributed as dist
 import numpy as np
 import pickle
+import torch.nn as nn
+import common
+import torch.optim.lr_scheduler as lr_scheduler
 
-def layer_recon_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: float = 1.):
-    # lmda = 0.0000001 #NOTE:CHECK
+def layer_recon_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: float = 1., model=None, test_loader=None):
+    model.train()
+    
     warmup = 0
     p = 2.0
     b_range = (20, 2)
-    device = 'cuda'
     
+    device = torch.device('cuda')
+    #Torch Parallel
     opt_params = [layer.weight_quantizer.alpha]
     optimizer = torch.optim.Adam(opt_params)
-    scheduler = None
+    # scheduler = None
+    scheduler = lr_scheduler.StepLR(optimizer, step_size=2500, gamma=0.3)
     layer.weight_quantizer.opt_mode = 'learned_hard_sigmoid'
     loss_func = ScaleLossFunction(layer, round_loss='relaxation', lmda=lmda,
                             max_count=iters, b_range=b_range,
                             decay_start=0, warmup=warmup, p=p)
     
-    cached_inp = layer.cached_inp_features
-    cached_out = layer.cached_out_features
+    cached_inp = torch.cat(layer.cached_inp_features)
+    cached_out = torch.cat(layer.cached_out_features)
+    batch_size = 128
     
-
     target = []
     for i in range(iters):
+        idx = torch.randperm(cached_inp.size(0))[:batch_size]
+        cur_inp = cached_inp[idx]
+        cur_out = cached_out[idx]
+        
         optimizer.zero_grad()
-        for inp, oup in zip(cached_inp, cached_out):
-            quant_out = layer(inp)
-            
-            err = loss_func(quant_out, oup)
-            err.backward(retain_graph=True)
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
+        # for inp, oup in zip(cached_inp, cached_out):
+        quant_out = layer(cur_inp)
+        
+        err = loss_func(quant_out, cur_out)
+        err.backward(retain_graph=True)
+        optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
         # print(i, layer.weight_quantizer.get_soft_targets()[0])
-        target.append(layer.weight_quantizer.get_soft_targets().detach().cpu().numpy())
+        if i%15 == 0:
+            target.append(layer.weight_quantizer.get_soft_targets().detach().cpu().numpy())
+        # if i % 500 == 0:
+        #     print(f'accuracy of qnn    : {common.validate_model(test_loader, model):.3f}')
         
     with open(f'./temp/param.pkl', 'wb') as f:
         target = np.array(target)
         pickle.dump(target, f)
         
     layer.weight_quantizer.hard_targets = True
-                
+    
     torch.cuda.empty_cache()
         
 class ScaleLossFunction:

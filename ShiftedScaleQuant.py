@@ -1,7 +1,6 @@
 import torch.nn as nn
 from data.cifar10 import build_cifar10_data
 from quant.quant_layer import QuantModule
-import telegram
 import pickle
 from myScaledMethods import *
 from quant.layer_recon_shiftedScale import *
@@ -21,22 +20,14 @@ def restore_ShiftedChannelQuant(model, layers, prv_name='', path='./temp/greedyL
                         print(f'Restored {name} shiftedScale')
         else:
             restore_ShiftedChannelQuant(module, layers, curName, path)
-
-def run_GreedyLoss(model, curName, layer, **kwargs):
-    layer.run_GreedyLoss()
-    # layer.run_GreedyLossSorted()
-    #Dump Current shifted Scale.
-    with open(f'./temp/greedyLoss/{curName}.pkl', 'wb') as f:
-        pickle.dump(layer.weight_quantizer.shiftedScale, f)
         
 def run_ShiftRecon(model, curName, layer, **kwargs):
-    lmda = kwargs['lmda']
-    layer_recon_shiftedScale(layer, 1200, lmda)
+    layer_recon_shiftedScale(layer, kwargs['iters'], kwargs['lmda'], model, kwargs['test_loader'])
                 
 def toggle_hardTarget(model, curName, layer, **kwargs):
     layer.weight_quantizer.hard_targets = not layer.weight_quantizer.hard_targets
     
-def channelShift_wLoss(test_loader, cali_data, botInfo, lmda, args):
+def channelShift_wLoss(test_loader, cali_data, botInfo, subArgs, args):
     kwargs = dict(
         cali_data=cali_data, 
         iters=args.iters_w, 
@@ -51,6 +42,11 @@ def channelShift_wLoss(test_loader, cali_data, botInfo, lmda, args):
         batch_size=args.batch_size,
         test_loader=test_loader,
     )
+    k_lmda = subArgs['lmda']
+    k_iters = subArgs['iters']
+    #My options
+    kwargs['lmda'] = k_lmda
+    kwargs['iters'] = k_iters
     layerEnabled = [
         '.model.layer1.0.conv1',
         '.model.layer1.0.conv2',
@@ -73,11 +69,11 @@ def channelShift_wLoss(test_loader, cali_data, botInfo, lmda, args):
         '.model.layer4.1.conv2',
     ]
     qnn = build_qnn(args, test_loader)
-    print(f'accuracy of qnn    : {validate_model(test_loader, qnn):.3f}')
     bot = telegram.Bot(token=botInfo['token'])
-    bot.sendMessage(chat_id=botInfo['id'], text=f'Starting with {lmda}')
+    # bot.sendMessage(chat_id=botInfo['id'], text=f'Starting with {k_lmda} & {k_iters}')
     build_ShiftedChannelQuant(qnn, layerEnabled, '', **kwargs) #only one layer
     qnn.set_quant_state(False, False)# Default Setting
+    
     
     accuracys = []
     for layer in layerEnabled:
@@ -87,139 +83,39 @@ def channelShift_wLoss(test_loader, cali_data, botInfo, lmda, args):
             _ = qnn(cali_data[i*args.batch_size:(i+1)*args.batch_size].to(device))
             
         #Cache output features(with quant state)
-        quant_state = store_quant_state(qnn)
-        qnn.set_quant_state(False, False)# For Accuracy test
+        qnn.store_quantization_state()
+        qnn.set_quant_state(False, False)# For Output Feature store
+        print("Layer: ", layer)
         set_cache_state(qnn, [layer], prv_name='', state='of')
         for i in range(len(cali_data)//args.batch_size):
             _ = qnn(cali_data[i*args.batch_size:(i+1)*args.batch_size].to(device))
-        restore_quant_state(qnn, quant_state)
+        qnn.restore_quantization_state()
         set_cache_state(qnn, [layer], prv_name='', state='none')
         
         #Run Quantization optimization
         set_weight_quant(qnn, [layer], '', True)
-        kwargs['lmda'] = lmda
-        QuantRecursiveRun(qnn, run_ShiftRecon, [layer], '', **kwargs)
+
+        QuantRecursiveRun(qnn, run_ShiftRecon, [layer], '', **kwargs) #Main Function
         qnn.clear_cached_features()
-        quant_state = store_quant_state(qnn)
+        
+        ####---- Test Area ---- Begin ####
+        qnn.store_quantization_state()
+        
         qnn.set_quant_state(True, False)# For Accuracy test
         QuantRecursiveRun(qnn, toggle_hardTarget, [layer], '', **kwargs)
         result_message = f'accuracy of qnn_soft{layer:28s}    : {validate_model(test_loader, qnn):.3f}'
         print(result_message)
-        bot.sendMessage(chat_id=botInfo['id'], text=result_message)
         QuantRecursiveRun(qnn, toggle_hardTarget, [layer], '', **kwargs)
         
-        accuracys += [validate_model(test_loader, qnn)]
+        accuracys += [validate_model(test_loader, qnn).cpu().numpy()]
         result_message = f'accuracy of qnn_hard{layer:28s}    : {validate_model(test_loader, qnn):.3f}'
         print(result_message)
-        bot.sendMessage(chat_id=botInfo['id'], text=result_message)
-        restore_quant_state(qnn, quant_state)
-    with open(f'./temp/accuracy_{lmda}.pkl', 'wb') as f:
-        pickle.dump(accuracys, f)
+        qnn.restore_quantization_state()
+        ####---- Test Area ---- End   ####
 
-def channelGreedyTest_wLoss(test_loader, cali_data, botInfo, args):
-    kwargs = dict(
-        cali_data=cali_data, 
-        iters=args.iters_w, 
-        weight=args.weight, 
-        asym=True,
-        b_range=(args.b_start, args.b_end), 
-        warmup=args.warmup, 
-        act_quant=False, 
-        opt_mode='mse', 
-        eval=True,
-        returnLoss=True,
-        batch_size=args.batch_size,
-        test_loader=test_loader,
-    )
-    layerEnabled = [
-        '.model.layer1.0.conv1',
-        '.model.layer1.0.conv2',
-        '.model.layer1.1.conv1',
-        '.model.layer1.1.conv2',
-        '.model.layer2.0.conv1',
-        '.model.layer2.0.conv2',
-        '.model.layer2.0.downsample.0',
-        '.model.layer2.1.conv1',
-        '.model.layer2.1.conv2',
-        '.model.layer3.0.conv1',
-        '.model.layer3.0.conv2',
-        '.model.layer3.0.downsample.0',
-        '.model.layer3.1.conv1',
-        '.model.layer3.1.conv2',
-        '.model.layer4.0.conv1',
-        '.model.layer4.0.conv2',
-        '.model.layer4.0.downsample.0',
-        '.model.layer4.1.conv1',
-        '.model.layer4.1.conv2',
-    ]
-    qnn = build_qnn(args, test_loader)
-    print(f'accuracy of qnn    : {validate_model(test_loader, qnn):.3f}')
-    bot = telegram.Bot(token=botInfo['token'])
-    # bot.sendMessage(chat_id=botInfo['id'], text='Starting GreedyTest with Loss')
-    build_ShiftedChannelQuant(qnn, layerEnabled, '', **kwargs) #only one layer
-    qnn.set_quant_state(False, False)# Default Setting
-    
-    # #NOTE: Temporal code for test
-    # for layer in layerEnabled:
-    #     set_weight_quant(qnn, [layer], '', True)
-    #     restore_ShiftedChannelQuant(qnn, [layer], '', './temp/greedyLoss/greedy_loss_L4')
-    #     quant_state = store_quant_state(qnn)
-    #     qnn.set_quant_state(True, False)# For Accuracy test
-    #     result_message = f'accuracy of qnn{layer:28s}    : {validate_model(test_loader, qnn):.3f}'
-    #     print(result_message)
-    #     restore_quant_state(qnn, quant_state)
-        
-    for layer in layerEnabled:
-        #Cache input features(with quant state)
-        set_cache_state(qnn, [layer], prv_name='', state='if')
-        for i in range(len(cali_data)//args.batch_size):
-            _ = qnn(cali_data[i*args.batch_size:(i+1)*args.batch_size].to(device))
-            
-        #Cache output features(with quant state)
-        quant_state = store_quant_state(qnn)
-        qnn.set_quant_state(False, False)# For Accuracy test
-        set_cache_state(qnn, [layer], prv_name='', state='of')
-        for i in range(len(cali_data)//args.batch_size):
-            _ = qnn(cali_data[i*args.batch_size:(i+1)*args.batch_size].to(device))
-        restore_quant_state(qnn, quant_state)
-        set_cache_state(qnn, [layer], prv_name='', state='none')
-        
-        #Run Quantization optimization
-        set_weight_quant(qnn, [layer], '', True)
-        QuantRecursiveRun(qnn, run_GreedyLoss, [layer], '', **kwargs)
-        qnn.clear_cached_features()
-        quant_state = store_quant_state(qnn)
-        qnn.set_quant_state(True, False)# For Accuracy test
-        result_message = f'accuracy of qnn{layer:28s}    : {validate_model(test_loader, qnn):.3f}'
-        print(result_message)
-        bot.sendMessage(chat_id=botInfo['id'], text=result_message)
-        restore_quant_state(qnn, quant_state)
-        
-
-def set_weight_quant(model, layers, prv_name='', state=False):
-    for name, module in model.named_children():
-        curName = prv_name+'.'+name
-        if isinstance(module, QuantModule):
-            if module.ignore_reconstruction is True:
-                continue
-            else:
-                if curName in layers:
-                    module.use_weight_quant = state
-        else:
-            set_weight_quant(module, layers, curName, state)
-        
-
-def set_cache_state(model, layers, prv_name='', state='none'):
-    for name, module in model.named_children():
-        curName = prv_name+'.'+name
-        if isinstance(module, QuantModule):
-            if module.ignore_reconstruction is True:
-                continue
-            else:
-                if curName in layers:
-                    module.cache_features = state
-        else:
-            set_cache_state(module, layers, curName, state)
+    bot.sendMessage(chat_id=botInfo['id'], text=str(np.array(accuracys)))
+    with open(f'./temp/accuracy_{k_lmda}_itr{k_iters}.pkl', 'wb') as f:
+        pickle.dump(np.array(accuracys), f)
 
 if __name__ == '__main__':
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -237,7 +133,15 @@ if __name__ == '__main__':
     # channelGreedyTest(test_loader, cali_data, args)
     # channelDistTest(test_loader, cali_data, args)
     # channelGreedyTest_wLoss(test_loader, cali_data, botInfo, args)
-    for i in range(10):
-        lmda = 0.0001 / (10)**i
-        channelShift_wLoss(test_loader, cali_data, botInfo, lmda, args)
+    itr = 1000
+    lmda = 0.0001
+    for itr in [1000, 4000, 8000]:
+        for i in range(0, 10):
+            kwargs = dict()
+            kwargs['iters'] = itr
+            kwargs['lmda'] = 100*((10)**(-i))
+            channelShift_wLoss(test_loader, cali_data, botInfo, kwargs, args)
+    
+    #Init Data
+    # init_delta_zero(args, cali_data, test_loader)
     

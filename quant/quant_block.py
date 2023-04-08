@@ -6,7 +6,9 @@ from quant.quant_layer import QuantModule, UniformAffineQuantizer, StraightThrou
 from models.resnet import BasicBlock, Bottleneck
 from models.regnet import ResBottleneckBlock
 from models.mobilenetv2 import InvertedResidual
-
+import sys
+sys.path.append('..')
+from pretrained.PyTorch_CIFAR10.cifar10_models.resnet import BasicBlock
 
 class BaseQuantBlock(nn.Module):
     """
@@ -33,6 +35,21 @@ class BaseQuantBlock(nn.Module):
         for m in self.modules():
             if isinstance(m, QuantModule):
                 m.set_quant_state(weight_quant, act_quant)
+                
+    def set_quant_init_state(self):
+        for m in self.modules():
+            if isinstance(m, QuantModule):
+                m.set_quant_init_state()
+            
+    def disable_cache_features(self):
+        for m in self.modules():
+            if isinstance(m, QuantModule):
+                m.disable_cache_features()
+                
+    def clear_cached_features(self):
+        for m in self.modules():
+            if isinstance(m, QuantModule):
+                m.clear_cached_features()
 
 
 class QuantBasicBlock(BaseQuantBlock):

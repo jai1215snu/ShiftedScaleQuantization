@@ -43,11 +43,12 @@ class ChannelQuant(nn.Module):
             raise ValueError('opt_mode is not defined')
             
         x_quant = torch.clamp(x_int + self.zero_point, 0, self.n_levels - 1)
+        x_quant = x_quant - self.zero_point
         
         if len(self.delta.shape) != 4: #NOTE: FC layer control
-            x_float_q = (x_quant - self.zero_point) * self.delta
+            x_float_q = x_quant * self.delta
         elif self.opt_mode == 'learned_hard_sigmoid':
-            x_float_q = (x_quant - self.zero_point) * self.delta
+            x_float_q = x_quant * self.delta
             soft_target = self.get_soft_targets().view(self.nchannel[0], self.nchannel[1], 1, 1)
             # print(x[0][0])
             # print(x_float_q[0][0])
@@ -57,10 +58,10 @@ class ChannelQuant(nn.Module):
             # print((self.deltaQuant*soft_target*self.delta)[0][0])
             if self.hard_targets:
                 soft_target = torch.where(soft_target > 0.5, torch.ones_like(soft_target), torch.zeros_like(soft_target))
-            x_float_q = x_float_q + self.deltaQuant*soft_target*self.delta
+            x_float_q = x_float_q + self.deltaQuant*soft_target
             # print(x_float_q[0][0])
         elif self.opt_mode == 'none':
-            x_float_q = (x_quant - self.zero_point) * (self.delta*self.shiftedScale)
+            x_float_q = x_quant * (self.delta*self.shiftedScale)
                 
         return x_float_q
     
@@ -76,56 +77,40 @@ class ChannelQuant(nn.Module):
         
         return x_float_q
 
-    # def init_resol(self, prob: float = 0.1):
-        # self.simpleScale = torch.randint(0, 2, size=(x.shape[0],), device=x.device)
-        # self.simpleScale = torch.pow(2, -self.simpleScale.float()).to(x.device)
-        
-    # def resetResol(self):
-    #     self.simpleScale = torch.zeros(self.nchannel)
-        
-    # def changeResol(self, oc, ic):
-    #     self.resetResol()
-    #     self.setResol(oc, ic)
-    
-    # def setResol(self, oc: int, ic: int, value: float = 1.0):
-    #     self.simpleScale[oc, ic] = value
-    #     self.simpleScale = (torch.ones_like(self.simpleScale) - (self.simpleScale.float() * (1-self.qscale))).to(self.device)
-        
     def setScale(self, selected):
         quantLevel = [1.0, 4/8, 2/8, 6/8, 3/8, 5/8, 7/8, 9/8]
         for i in range(8):
             self.shiftedScale[(selected == i)] = quantLevel[i]
                 
-    # def run_layerRandomize(self):
-    #     randomValue = torch.multinomial(torch.tensor([1-self.shuffle_ratio, self.shuffle_ratio]), num_samples=self.nchannel[0]*self.nchannel[1], replacement=True)
-    #     randomValue = randomValue.reshape(self.nchannel[0], self.nchannel[1])
-    #     self.setScale(randomValue)
-        
     def get_soft_targets(self):
         return torch.clamp(torch.sigmoid(self.alpha) * (self.zeta - self.gamma) + self.gamma, 0, 1)
-        
     
+    @torch.no_grad()
+    def init_alpha(self, x: torch.Tensor, x_q: torch.Tensor, clip = [0.1, 0.9]):
+        # W_Q = W_QS + DeltaQuant x H(Alpha)
+        # YX = DeltaQuant x H(Alpha)
+        # H(Alpha) = sum(DxYX)/sum(DxD) -> from linear regression normal equation
+        yx = x - x_q
+        d = self.deltaQuant
+        w = torch.sum(d*yx, dim=(-1, -2))/torch.sum(d*d+1e-9, dim=(-1, -2))
+        return torch.clamp(w, min=clip[0], max=clip[1])
+        
     def init_v(self, x: torch.Tensor):
-        alpha = torch.zeros(self.nchannel, device=self.device)
+        #Make linear function for deltaQuant
+        # W_Q = W_QS + (W_QS - W_QS/2) x H(Alpha)
+        # W_Q = W_QS + DeltaQuant x H(Alpha)
         x_q = self(x)
         self.shiftedScale = self.shiftedScale / 2
         x_2q = self(x)
         self.shiftedScale = self.shiftedScale * 2
-        self.deltaQuant = (x_2q - x_q)/self.delta
+        self.deltaQuant = (x_2q - x_q)
         
-        mask = (self.deltaQuant == 0)
-        mask = torch.all(mask, dim=3)
-        mask = torch.all(mask, dim=2)
+        alpha = torch.zeros(self.nchannel, device=self.device)
+        p = self.init_alpha(x, x_q)
+        alpha = torch.log(p/(1-p))
         
-        alpha = torch.where(mask, torch.tensor(1e3, device=self.device), alpha)
+        # mask = (self.deltaQuant == 0)
+        # mask = torch.all(mask, dim=3)
+        # mask = torch.all(mask, dim=2)
+        # alpha = torch.where(mask, torch.tensor(1e3, device=self.device), alpha)
         self.alpha = nn.Parameter(alpha)
-        
-        # print(mask.shape, mask[0][6])
-
-        # print(self.delta[0])
-        # print(x[0][6])
-        # print(x_q[0][6])
-        # print(x_2q[0][6])
-        # print(self.deltaQuant[0][6])
-        # print("="*20)
-        # exit(1)
