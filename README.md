@@ -7,6 +7,7 @@ IMAGE net setup
 Multi bit scaling setup
 
 3,4 bit test
+fully-connected
 
 #Best Perform.
 90.7
