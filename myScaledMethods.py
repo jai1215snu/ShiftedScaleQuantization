@@ -1,7 +1,8 @@
 import pickle
 import torch.nn as nn
 from quant.quant_model import QuantModel
-from quant.quant_layer import QuantModule
+from quant.quant_layer import QuantModule, UniformAffineQuantizer
+from quant.quant_block import BaseQuantBlock, QuantBasicBlock
 import pandas as pd
 from pretrained.PyTorch_CIFAR10.cifar10_models.resnet import resnet18
 from quant.channelQuant import ChannelQuant
@@ -9,20 +10,39 @@ from tqdm import tqdm
 import telegram
 from common import *
 
-def build_ShiftedChannelQuantLayer(model, curName, layer, **kwargs):
-    layer.weight_quantizer = ChannelQuant(uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data)
+def build_ShiftedChannelQuantLayer(model, curName, layer, delta=1.0, **kwargs):
+    layer.weight_quantizer = ChannelQuant(delta, uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data)
     layer.use_weight_quant = True
     layer.cache_features   = 'none'
     
-def build_ShiftedChannelQuant(model: nn.Module, layerEnabled, prv_name="", **kwargs):
+def build_ShiftedChannelQuantBlock(model, prv_name, block, delta=1.0, **kwargs):
+    for name, layer in model.named_children():
+        curName = prv_name+'.'+name
+        # print("block const name: ", curName, type(layer))
+        if isinstance(layer, QuantModule):
+            if isinstance(layer.weight_quantizer, UniformAffineQuantizer):
+                layer.weight_quantizer = ChannelQuant(delta, uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data)
+                layer.use_weight_quant = True
+                layer.cache_features   = 'none'
+        else:
+            build_ShiftedChannelQuantBlock(layer, curName, block, **kwargs)
+    
+def build_ShiftedChannelQuant(model: nn.Module, layerEnabled, prv_name="", delta=1.0, **kwargs):
     for name, module in model.named_children():
         curName = prv_name+'.'+name
+        # print("Building shifted channel quant for: ", curName, type(module))
         if isinstance(module, QuantModule):
             if module.ignore_reconstruction is True:
                 continue
+            if curName in layerEnabled:
+                build_ShiftedChannelQuantLayer(model, curName, module, delta, **kwargs)
+        elif isinstance(module, QuantBasicBlock):
+            if module.ignore_reconstruction is True:
+                continue
+            if curName in layerEnabled:
+                build_ShiftedChannelQuantBlock(model, curName, module, delta, **kwargs)
             else:
-                if curName in layerEnabled:
-                    build_ShiftedChannelQuantLayer(model, curName, module, **kwargs)
+                build_ShiftedChannelQuant(module, layerEnabled, curName, **kwargs)
         else:
             build_ShiftedChannelQuant(module, layerEnabled, curName, **kwargs)
 
@@ -46,9 +66,13 @@ def set_weight_quant(model, layers, prv_name='', state=False):
         if isinstance(module, QuantModule):
             if module.ignore_reconstruction is True:
                 continue
-            else:
-                if curName in layers:
-                    module.use_weight_quant = state
+            if curName in layers:
+                module.use_weight_quant = state
+        elif isinstance(module, BaseQuantBlock):
+            if module.ignore_reconstruction is True:
+                continue
+            if curName in layers:
+                module.set_weight_quant(state)
         else:
             set_weight_quant(module, layers, curName, state)
         
@@ -56,14 +80,15 @@ def set_weight_quant(model, layers, prv_name='', state=False):
 def set_cache_state(model, layers, prv_name='', state='none'):
     for name, module in model.named_children():
         curName = prv_name+'.'+name
-        if isinstance(module, QuantModule):
+        if curName in layers:
             if module.ignore_reconstruction is True:
                 continue
-            else:
-                if curName in layers:
-                    module.cache_features = state
+            module.cache_features = state
+        elif isinstance(module, QuantModule):
+            continue
         else:
-            set_cache_state(module, layers, curName, state)            
+            set_cache_state(module, layers, curName, state)     
+            
 
 def channelGreedyTest_wLoss(test_loader, cali_data, botInfo, args):
     kwargs = dict(
@@ -220,9 +245,28 @@ def dump_quant_feature(model, curName, layer, **kwargs):
 def dump_ori_feature(model, curName, layer, **kwargs):
     return layer.cached_out_features
 
+
+def QuantRecursiveToggle_hardTarget(model: nn.Module, layerEnabled, prv_name="", result=dict(), **kwargs):
+    for name, module in model.named_children():
+        curName = prv_name+'.'+name
+        # print(curName)
+        if isinstance(module, QuantModule):
+            if module.ignore_reconstruction is True:
+                continue
+            if curName in layerEnabled:
+                module.weight_quantizer.hard_targets = not module.weight_quantizer.hard_targets
+        elif isinstance(module, QuantBasicBlock):
+            if module.ignore_reconstruction is True:
+                continue
+            if curName in layerEnabled:
+                module.toggleHardTarget()
+        else:
+            QuantRecursiveToggle_hardTarget(module, layerEnabled, curName, result, **kwargs)
+
 def QuantRecursiveRun(model: nn.Module, func, layerEnabled, prv_name="", result=dict(), **kwargs):
     for name, module in model.named_children():
         curName = prv_name+'.'+name
+        # print(curName)
         if isinstance(module, QuantModule):
             if module.ignore_reconstruction is True:
                 continue

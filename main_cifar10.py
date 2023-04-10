@@ -25,7 +25,7 @@ if __name__ == '__main__':
     skip_act_recon = False
     
     # # build quantization parameters
-    wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse'}
+    wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'tune_delta_zero':True}
     aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'leaf_param': args.act_quant}
     qnn = QuantModel(model=cnn, weight_quant_params=wq_params, act_quant_params=aq_params)
     qnn.cuda()
@@ -61,25 +61,26 @@ if __name__ == '__main__':
                     # print(f'Ignore reconstruction of layer {format(name)}')
                     continue
                 else:
-                    # print(f'Reconstruction for layer {format(name)}')
+                    print(f'Reconstruction for layer {format(name)}')
                     layer_reconstruction(qnn, module, **kwargs)
             elif isinstance(module, BaseQuantBlock):
                 if module.ignore_reconstruction is True:
                     # print(f'Ignore reconstruction of block {format(name)}')
                     continue
                 else:
-                    # print(f'Reconstruction for block {format(name)}')
+                    print(f'Reconstruction for block {format(name)}')
                     block_reconstruction(qnn, module, **kwargs)
             else:
                 recon_model(module)
     # Start calibration
     recon_model(qnn)
-    if skip_weight_recon:
-        print(f"loading : ./checkPoint/QNN_W{args.n_bits_w}_FP32.pth")
-        st = torch.load(f'./checkPoint/QNN_W{args.n_bits_w}_FP32.pth')
-        qnn.load_state_dict(st)
+    # if skip_weight_recon:
+    #     print(f"loading : ./checkPoint/QNN_W{args.n_bits_w}_FP32.pth")
+    #     st = torch.load(f'./checkPoint/QNN_W{args.n_bits_w}_FP32.pth')
+    #     qnn.load_state_dict(st)
     qnn.set_quant_state(weight_quant=True, act_quant=False)
     print('Weight quantization accuracy: {}'.format(validate_model(test_loader, qnn)))
+    exit(1)
     
     #Save torch model
     torch.save(qnn.state_dict(), f'./checkPoint/QNN_W{args.n_bits_w}_FP32.pth')

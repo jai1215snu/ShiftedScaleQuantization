@@ -16,17 +16,23 @@ def build_cifar10_data(data_path: str = '', input_size: int = 224, batch_size: i
                                      std=T_std)
 
     transforms_train = transforms.Compose([
-            transforms.RandomResizedCrop(input_size),
+            # transforms.RandomResizedCrop(input_size),
+            # transforms.RandomHorizontalFlip(),
+            # transforms.ToTensor(),
+            # normalize,
+            transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            normalize,
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
         ])
         
     transforms_test = transforms.Compose([
             # transforms.Resize(256),
             # transforms.CenterCrop(input_size),
+            # transforms.ToTensor(),
+            # normalize,
             transforms.ToTensor(),
-            normalize,
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
         ])
     
     train_dataset = CIFAR10(root=data_path, train=True, download=False, transform=transforms_train)

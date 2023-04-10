@@ -3,12 +3,12 @@ from torch import nn
 from quant.quant_layer import UniformAffineQuantizer, round_ste
 
 class ChannelQuant(nn.Module):
-    def __init__(self, uaq: UniformAffineQuantizer, weight_tensor: torch.Tensor):
+    def __init__(self, delta, uaq: UniformAffineQuantizer, weight_tensor: torch.Tensor):
         super(ChannelQuant, self).__init__()
         # copying all attributes from UniformAffineQuantizer
         self.n_bits = uaq.n_bits
         self.sym = uaq.sym
-        self.delta = uaq.delta
+        self.delta = uaq.delta * delta
         self.zero_point = uaq.zero_point
         self.n_levels = uaq.n_levels
         self.device = weight_tensor.device
@@ -28,7 +28,8 @@ class ChannelQuant(nn.Module):
         self.deltaQuant = None
         
         self.init_v(x=weight_tensor.clone().detach())
-
+        
+        self.shiftedDone = False
         # params for sigmoid function
         # self.init_resol(prob=shuffle_ratio)
 
@@ -86,7 +87,7 @@ class ChannelQuant(nn.Module):
         return torch.clamp(torch.sigmoid(self.alpha) * (self.zeta - self.gamma) + self.gamma, 0, 1)
     
     @torch.no_grad()
-    def init_alpha(self, x: torch.Tensor, x_q: torch.Tensor, clip = [0.1, 0.9]):
+    def init_alpha(self, x: torch.Tensor, x_q: torch.Tensor, clip = [0.15, 0.85]):
         # W_Q = W_QS + DeltaQuant x H(Alpha)
         # YX = DeltaQuant x H(Alpha)
         # H(Alpha) = sum(DxYX)/sum(DxD) -> from linear regression normal equation
@@ -99,6 +100,7 @@ class ChannelQuant(nn.Module):
         #Make linear function for deltaQuant
         # W_Q = W_QS + (W_QS - W_QS/2) x H(Alpha)
         # W_Q = W_QS + DeltaQuant x H(Alpha)
+        self.opt_mode = 'none'
         x_q = self(x)
         self.shiftedScale = self.shiftedScale / 2
         x_2q = self(x)
@@ -109,8 +111,13 @@ class ChannelQuant(nn.Module):
         p = self.init_alpha(x, x_q)
         alpha = torch.log(p/(1-p))
         
+        # p = torch.tensor(0.2, device=self.device)
+        # alpha.fill_(torch.log(p/(1-p)))
+        
         # mask = (self.deltaQuant == 0)
         # mask = torch.all(mask, dim=3)
         # mask = torch.all(mask, dim=2)
         # alpha = torch.where(mask, torch.tensor(1e3, device=self.device), alpha)
         self.alpha = nn.Parameter(alpha)
+        self.opt_mode = 'learned_hard_sigmoid'
+        

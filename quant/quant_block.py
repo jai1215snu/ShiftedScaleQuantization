@@ -27,6 +27,12 @@ class BaseQuantBlock(nn.Module):
         self.activation_function = StraightThrough()
 
         self.ignore_reconstruction = False
+        self.cache_features      = 'none'
+        self.cached_inp_features = []
+        self.cached_out_features = []
+        
+        self.selectionInited = False
+        self.pathName = ''
 
     def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
         # setting weight quantization here does not affect actual forward pass
@@ -50,6 +56,18 @@ class BaseQuantBlock(nn.Module):
         for m in self.modules():
             if isinstance(m, QuantModule):
                 m.clear_cached_features()
+                
+    def set_weight_quant(self, state):
+        for m in self.modules():
+            if isinstance(m, QuantModule):
+                m.use_weight_quant = state
+    
+    def disable_cache_features(self):
+        self.cache_features = 'none'
+        
+    def clear_cached_features(self):
+        self.cached_inp_features = []
+        self.cached_out_features = []
 
 
 class QuantBasicBlock(BaseQuantBlock):
@@ -72,8 +90,14 @@ class QuantBasicBlock(BaseQuantBlock):
                                           disable_act_quant=True)
         # copying all attributes in original block
         self.stride = basic_block.stride
+        
+        #TODO:debug purpose. remove after debugging
+        self.dump_cnt = 0
 
     def forward(self, x):
+        if self.cache_features == 'if':
+            self.cached_inp_features += [x.to('cpu').clone().detach()]
+            
         residual = x if self.downsample is None else self.downsample(x)
         out = self.conv1(x)
         out = self.conv2(out)
@@ -81,8 +105,28 @@ class QuantBasicBlock(BaseQuantBlock):
         out = self.activation_function(out)
         if self.use_act_quant:
             out = self.act_quantizer(out)
+        
+        if self.cache_features == 'debug':
+            torch.save(out, f'layer4.1_{self.dump_cnt}.pt')
+            self.dump_cnt += 1
+        
+        if self.cache_features == 'of':
+            self.cached_out_features += [out.to('cpu').clone().detach()]
         return out
 
+    def setPathName(self, curName):
+        self.pathName = curName
+        self.conv1.pathName = curName+'.conv1'
+        self.conv2.pathName = curName+'.conv2'
+        if self.downsample is not None:
+            self.downsample.pathName = curName+'.downsample'
+            
+    def toggleHardTarget(self):
+        self.conv1.weight_quantizer.hard_targets = not self.conv1.weight_quantizer.hard_targets
+        self.conv2.weight_quantizer.hard_targets = not self.conv2.weight_quantizer.hard_targets
+        if self.downsample is not None:
+            self.downsample.weight_quantizer.hard_targets = not self.downsample.weight_quantizer.hard_targets
+        
 
 class QuantBottleneck(BaseQuantBlock):
     """

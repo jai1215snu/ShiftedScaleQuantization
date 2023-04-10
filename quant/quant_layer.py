@@ -208,16 +208,16 @@ class QuantModule(nn.Module):
         self.cache_features      = 'none'
         self.cached_inp_features = []
         self.cached_out_features = []
-        self.cached_out_quant_features = []
         
         self.selection = None # for greedy selection
         
         self.selectionInited = False
         self.pathName = ''
-
+        self.dump_cnt = 0#NOTE:debug purpose. remove after debugging
+        
     def forward(self, input: torch.Tensor):
         if self.cache_features == 'if':
-            self.cached_inp_features += [input.clone().detach()]
+            self.cached_inp_features += [input.cpu().clone().detach()]
             
         if self.use_weight_quant and self.cache_features == 'none':
             weight = self.weight_quantizer(self.weight)
@@ -238,27 +238,31 @@ class QuantModule(nn.Module):
         if not self.disable_act_quant:
             if self.use_act_quant:
                 out = self.act_quantizer(out)
-            
+                
+        if self.cache_features == 'debug':
+            torch.save(out, f'fc_{self.dump_cnt}.pt')
+            self.dump_cnt += 1
+        
         if self.cache_features == 'of':
-            self.cached_out_features += [out.clone().detach()]
+            self.cached_out_features += [out.cpu().clone().detach()]
             
         return out
     
-    def cal_quantLoss(self):
-        quant_out = self.selfForward()
-        ori_out = self.cached_out_features
+    # def cal_quantLoss(self):
+    #     quant_out = self.selfForward()
+    #     ori_out = self.cached_out_features
         
-        # weight_quant = 
+    #     # weight_quant = 
         
-        #Calculate Loss(difference between quantized output and original output)
-        # loss = F.mse_loss(weight_quant, self.weight)
-        # loss = (self.weight_quantizer(self.weight) - self.weight).abs().pow(3).sum(1).mean().detach().cpu().item()
-        loss = self.getLoss(quant_out, ori_out, p=2.4)
+    #     #Calculate Loss(difference between quantized output and original output)
+    #     # loss = F.mse_loss(weight_quant, self.weight)
+    #     # loss = (self.weight_quantizer(self.weight) - self.weight).abs().pow(3).sum(1).mean().detach().cpu().item()
+    #     loss = self.getLoss(quant_out, ori_out, p=2.4)
 
-        #TODO:Temp
-        # self.cached_out_quant_features = quant_out
+    #     #TODO:Temp
+    #     # self.cached_out_quant_features = quant_out
             
-        return loss
+    #     return loss
 
     def set_quant_init_state(self):
         self.weight_quantizer.inited = True
@@ -273,13 +277,12 @@ class QuantModule(nn.Module):
     def clear_cached_features(self):
         self.cached_inp_features = []
         self.cached_out_features = []
-        self.cached_out_quant_features = []
     
-    def selfForward(self):
-        quant_out = []
-        for inp in self.cached_inp_features:
-            quant_out += [self.forward(inp).detach()]
-        return quant_out
+    # def selfForward(self):
+    #     quant_out = []
+    #     for inp in self.cached_inp_features:
+    #         quant_out += [self.forward(inp).detach()]
+    #     return quant_out
     
     def getLoss(self, A, B, p=2.0):
         loss = 0.0
