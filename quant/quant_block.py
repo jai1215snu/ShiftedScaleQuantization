@@ -22,7 +22,7 @@ class BaseQuantBlock(nn.Module):
         self.use_weight_quant = False
         self.use_act_quant = False
         # initialize quantizer
-
+        act_quant_params['disable_act_quant'] = False
         self.act_quantizer = UniformAffineQuantizer(**act_quant_params)
         self.activation_function = StraightThrough()
 
@@ -57,10 +57,13 @@ class BaseQuantBlock(nn.Module):
             if isinstance(m, QuantModule):
                 m.clear_cached_features()
                 
-    def set_weight_quant(self, state):
+    def set_quant_state_block(self, state, act=False):
         for m in self.modules():
             if isinstance(m, QuantModule):
-                m.use_weight_quant = state
+                if act:
+                    m.use_act_quant = state
+                else:
+                    m.use_weight_quant = state
     
     def disable_cache_features(self):
         self.cache_features = 'none'
@@ -91,8 +94,7 @@ class QuantBasicBlock(BaseQuantBlock):
         # copying all attributes in original block
         self.stride = basic_block.stride
         
-        #TODO:debug purpose. remove after debugging
-        self.dump_cnt = 0
+        # self.dump_cnt = 0
 
     def forward(self, x):
         if self.cache_features == 'if':
@@ -106,9 +108,9 @@ class QuantBasicBlock(BaseQuantBlock):
         if self.use_act_quant:
             out = self.act_quantizer(out)
         
-        if self.cache_features == 'debug':
-            torch.save(out, f'layer4.1_{self.dump_cnt}.pt')
-            self.dump_cnt += 1
+        # if self.cache_features == 'debug':
+        #     torch.save(out, f'layer4.1_{self.dump_cnt}.pt')
+        #     self.dump_cnt += 1
         
         if self.cache_features == 'of':
             self.cached_out_features += [out.to('cpu').clone().detach()]

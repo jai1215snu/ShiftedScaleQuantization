@@ -11,17 +11,19 @@ import telegram
 from common import *
 
 def build_ShiftedChannelQuantLayer(model, curName, layer, delta=1.0, **kwargs):
-    layer.weight_quantizer = ChannelQuant(delta, uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data)
+    shiftTarget = kwargs['shiftTarget']
+    layer.weight_quantizer = ChannelQuant(delta, uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data, shiftTarget=shiftTarget)
     layer.use_weight_quant = True
     layer.cache_features   = 'none'
     
 def build_ShiftedChannelQuantBlock(model, prv_name, block, delta=1.0, **kwargs):
+    shiftTarget = kwargs['shiftTarget']
     for name, layer in model.named_children():
         curName = prv_name+'.'+name
         # print("block const name: ", curName, type(layer))
         if isinstance(layer, QuantModule):
             if isinstance(layer.weight_quantizer, UniformAffineQuantizer):
-                layer.weight_quantizer = ChannelQuant(delta, uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data)
+                layer.weight_quantizer = ChannelQuant(delta, uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data, shiftTarget=shiftTarget)
                 layer.use_weight_quant = True
                 layer.cache_features   = 'none'
         else:
@@ -60,21 +62,24 @@ def build_ShiftedChannelQuant(model: nn.Module, layerEnabled, prv_name="", delta
 #             m.use_weight_quant = qState[idx]
 #             idx += 1
             
-def set_weight_quant(model, layers, prv_name='', state=False):
+def set_quant_state_block(model, layers, prv_name='', state=False, act=False):
     for name, module in model.named_children():
         curName = prv_name+'.'+name
         if isinstance(module, QuantModule):
             if module.ignore_reconstruction is True:
                 continue
             if curName in layers:
-                module.use_weight_quant = state
+                if act:
+                    module.use_act_quant = state
+                else:
+                    module.use_weight_quant = state
         elif isinstance(module, BaseQuantBlock):
             if module.ignore_reconstruction is True:
                 continue
             if curName in layers:
-                module.set_weight_quant(state)
+                module.set_quant_state_block(state, act)
         else:
-            set_weight_quant(module, layers, curName, state)
+            set_quant_state_block(module, layers, curName, state, act)
         
 
 def set_cache_state(model, layers, prv_name='', state='none'):
@@ -184,25 +189,32 @@ def init_delta_zero(args, cali_data, test_loader):
     
     # build quantization parameters
     wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'tune_delta_zero':True, 'leaf_param':True} #NOTE: tune_delta_zero is True
-    aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'leaf_param': args.act_quant}
+    aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'tune_delta_zero':True, 'leaf_param': args.act_quant}
     qnn = QuantModel(model=cnn, weight_quant_params=wq_params, act_quant_params=aq_params)
     qnn.cuda()
     qnn.eval()
     if not args.disable_8bit_head_stem:
         print('Setting the first and the last layer to 8-bit')
         qnn.set_first_last_layer_to_8bit()
-    qnn.set_quant_state(True, False)# For weight scale/zp initialization
-    _ = qnn(cali_data[:64].to('cuda:0'))
+    # qnn.set_quant_state(True, False)# For weight scale/zp initialization
+    # _ = qnn(cali_data[:64].to('cuda:0'))
     
-    params_dict = {}
-    for name, param in qnn.named_parameters():
-        print("torch saving ", name)
-        params_dict[name] = param.data
+    # params_dict = {}
+    # for name, param in qnn.named_parameters():
+    #     print("torch saving ", name)
+    #     params_dict[name] = param.data
 
-    # Save the parameters dictionary
-    torch.save(params_dict, f'./QNN_CW_W{args.n_bits_w}_FP32.pth')
+    # # Save the parameters dictionary
+    # torch.save(params_dict, f'./QNN_CW_W{args.n_bits_w}_FP32.pth')
     
-    
+    qnn.set_quant_state(True, True)# For weight scale/zp initialization
+    _ = qnn(cali_data[:64].to('cuda:0'))
+    params_dict = {}
+    for name, param in qnn.named_parameters():    # for name, param in qnn.named_parameters():
+        print("torch saving ", name, param.data.shape)
+        params_dict[name] = param.data
+    torch.save(params_dict, f'./QNN_CW_W{args.n_bits_w}_A{args.n_bits_a}.pth')
+        
 def build_qnn(args, test_loader):
     cnn = resnet18(pretrained=True, device='cuda:0')
     cnn.cuda()
@@ -212,7 +224,7 @@ def build_qnn(args, test_loader):
     
     # build quantization parameters
     wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'tune_delta_zero':False}
-    aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'leaf_param': args.act_quant}
+    aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'tune_delta_zero':False, 'leaf_param': True}
     qnn = QuantModel(model=cnn, weight_quant_params=wq_params, act_quant_params=aq_params)
     qnn.cuda()
     qnn.eval()
@@ -220,7 +232,8 @@ def build_qnn(args, test_loader):
         print('Setting the first and the last layer to 8-bit')
         qnn.set_first_last_layer_to_8bit()
     #Only Weight Quantization
-    qnn.load_state_dict(torch.load(f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth'))
+    # qnn.load_state_dict(torch.load(f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth'))
+    qnn.load_state_dict(torch.load(f'./checkPoint/QNN_CW_W{args.n_bits_w}_A{args.n_bits_a}.pth'))
     # qnn.set_quant_state(True, False)# For weight scale/zp initialization
     # _ = qnn(cali_data[:64].to(device))
     qnn.set_quant_init_state() #weight_quantizer.inited = True

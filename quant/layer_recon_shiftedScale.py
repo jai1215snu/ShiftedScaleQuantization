@@ -1,5 +1,5 @@
 import torch
-from quant.quant_layer import QuantModule, StraightThrough, lp_loss
+from quant.quant_layer import QuantModule, UniformAffineQuantizer, lp_loss
 from quant.quant_block import BaseQuantBlock
 import torch.distributed as dist
 import numpy as np
@@ -9,29 +9,47 @@ import common
 import torch.optim.lr_scheduler as lr_scheduler
 from tqdm import tqdm
 
-def block_recon_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: float = 1., model=None, test_loader=None):
+def block_recon_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: float = 1., model=None, test_loader=None, act=False):
     block.train()
-    warmup = 0.2
+    warmup = 0.5
     p = 2.0
     b_range = (20, 2)
     device = torch.device('cuda')
+    lr = 0.0001
     
     opt_params = []
-    #Init setting for all weight quantizer
-    for name, module in block.named_modules():
-        if isinstance(module, QuantModule):
-            if not module.weight_quantizer.shiftedDone:
-                opt_params += [module.weight_quantizer.alpha]
-                module.weight_quantizer.opt_mode = 'learned_hard_sigmoid'
     
-    opt_param_num = sum([p.numel() for p in opt_params])
-    print("number of elements in opt_params: {}".format(opt_param_num))
+    if act:
+        #Init setting for all weight quantizer
+        for name, module in block.named_modules():
+            if isinstance(module, QuantModule):
+                if module.act_quantizer.disable_act_quant:
+                    continue
+                opt_params += [module.act_quantizer.delta]
+            elif isinstance(module, UniformAffineQuantizer):
+                if module.disable_act_quant:
+                    continue
+                opt_params += [module.delta]
+        optimizer = torch.optim.Adam(opt_params, lr=lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=iters, eta_min=0.)
+    else:
+        #Init setting for all weight quantizer
+        for name, module in block.named_modules():
+            if isinstance(module, QuantModule):
+                if not module.weight_quantizer.shiftedDone:
+                    opt_params += [module.weight_quantizer.alpha]
+                    module.weight_quantizer.opt_mode = 'learned_hard_sigmoid'
+        optimizer = torch.optim.Adam(opt_params)
+        scheduler = None
+        # scheduler = lr_scheduler.StepLR(optimizer, step_size=iters*, gamma=0.3)
+        # warmup = 0
+        opt_param_num = sum([p.numel() for p in opt_params])
+        print("number of elements in opt_params: {}".format(opt_param_num))
+        
+    loss_mode = 'none' if act else 'relaxation'
+    
     # lmda = lmda * opt_param_num
-                
-    optimizer = torch.optim.Adam(opt_params)
-    # scheduler = None
-    scheduler = lr_scheduler.StepLR(optimizer, step_size=2500, gamma=0.3)
-    loss_func = ScaleLossBlockFunction(block, round_loss='relaxation', lmda=lmda,
+    loss_func = ScaleLossBlockFunction(block, round_loss=loss_mode, lmda=lmda,
                             max_count=iters, b_range=b_range,
                             decay_start=0, warmup=warmup, p=p)
     
@@ -39,7 +57,7 @@ def block_recon_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: fl
     cached_out = torch.cat(block.cached_out_features)
     batch_size = 128
     
-    # target = []
+    target = []
     sub_iter = cached_inp.size(0)//batch_size
     for i in range(iters//sub_iter):
         permIdx = torch.randperm(cached_inp.size(0))
@@ -56,25 +74,48 @@ def block_recon_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: fl
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
-        if i%10 == 0:
+                
+        if i%50 == 0 and not act:
+            target.append(block.conv1.weight_quantizer.get_sig_soft_targets().detach().cpu().numpy())
+                
+        if i%100 == 0:
             model.store_quantization_state()
-            model.set_quant_state(True, False)# For Accuracy test
-            result_message = f'accuracy of qnn_soft[{i:5d}/{iters//sub_iter:5d}]    : {common.validate_model(test_loader, model):.3f}'
+            model.set_quant_state(True, act)# For Accuracy test
+            if act:
+                hard_acc = common.validate_model(test_loader, model)
+                result_message = f'accuracy [{i:5d} / {iters//sub_iter:5d}] : {hard_acc:.3f} {loss_func.report()}'
+            else:
+                soft_acc = common.validate_model(test_loader, model)
+                
+                for name, module in block.named_modules():
+                    if isinstance(module, QuantModule):
+                        module.weight_quantizer.hard_targets = True
+                hard_acc = common.validate_model(test_loader, model)
+                for name, module in block.named_modules():
+                    if isinstance(module, QuantModule):
+                        module.weight_quantizer.hard_targets = False
+                result_message = f'accuracy [{i:5d} / {iters//sub_iter:5d}] : {soft_acc:.3f}/{hard_acc:.3f} {loss_func.report()}'
+                
             print(result_message)
             model.restore_quantization_state()
     
-    for name, module in block.named_modules():
-        if isinstance(module, QuantModule):
-            module.weight_quantizer.hard_targets = True
-            module.weight_quantizer.shiftedDone = True
+    if not act:
+        for name, module in block.named_modules():
+            if isinstance(module, QuantModule):
+                module.weight_quantizer.hard_targets = True
+                module.weight_quantizer.shiftedDone = True
+                
+        with open(f'./temp/param.pkl', 'wb') as f:
+            target = np.array(target)
+            pickle.dump(target, f)
     
     torch.cuda.empty_cache()
     model.eval()
 
-def layer_recon_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: float = 1., model=None, test_loader=None):
+def layer_recon_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: float = 1., model=None, test_loader=None, act=False):
     model.train()
     
-    warmup = 0
+    warmup = 0.5
     p = 2.0
     b_range = (20, 2)
     
@@ -94,25 +135,38 @@ def layer_recon_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: float
     batch_size = 128
     
     target = []
-    for i in range(iters):
-        idx = torch.randperm(cached_inp.size(0))[:batch_size]
-        cur_inp = cached_inp[idx].to(device)
-        cur_out = cached_out[idx].to(device)
+    sub_iter = cached_inp.size(0)//batch_size
+    for i in range(iters//sub_iter):
+        permIdx = torch.randperm(cached_inp.size(0))
+        for k in range(sub_iter):
+            idx = permIdx[batch_size*k:batch_size*(k+1)]
+            cur_inp = cached_inp[idx].to(device)
+            cur_out = cached_out[idx].to(device)
+            
+            optimizer.zero_grad()
+            # for inp, oup in zip(cached_inp, cached_out):
+            quant_out = layer(cur_inp)
+            
+            err = loss_func(quant_out, cur_out)
+            err.backward(retain_graph=True)
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+            # print(i, layer.weight_quantizer.get_soft_targets()[0])
+        if i%50 == 0:
+            target.append(layer.weight_quantizer.get_sig_soft_targets().detach().cpu().numpy())
+        if i%100 == 0:
+            model.store_quantization_state()
+            model.set_quant_state(True, False)# For Accuracy test
+            soft_acc = common.validate_model(test_loader, model)
+            
+            layer.weight_quantizer.hard_targets = True
+            hard_acc = common.validate_model(test_loader, model)
+            layer.weight_quantizer.hard_targets = False
         
-        optimizer.zero_grad()
-        # for inp, oup in zip(cached_inp, cached_out):
-        quant_out = layer(cur_inp)
-        
-        err = loss_func(quant_out, cur_out)
-        err.backward(retain_graph=True)
-        optimizer.step()
-        if scheduler is not None:
-            scheduler.step()
-        # print(i, layer.weight_quantizer.get_soft_targets()[0])
-        if i%15 == 0:
-            target.append(layer.weight_quantizer.get_soft_targets().detach().cpu().numpy())
-        # if i % 500 == 0:
-        #     print(f'accuracy of qnn    : {common.validate_model(test_loader, model):.3f}')
+            result_message = f'accuracy [{i:5d}/{iters//sub_iter:5d}] : {soft_acc:.3f} / {hard_acc:.3f} {loss_func.report()}'
+            print(result_message)
+            model.restore_quantization_state()
         
     with open(f'./temp/param.pkl', 'wb') as f:
         target = np.array(target)
@@ -123,7 +177,6 @@ def layer_recon_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: float
     
     torch.cuda.empty_cache()
     model.eval()
-
         
 class ScaleLossBlockFunction:
     def __init__(self,
@@ -142,7 +195,8 @@ class ScaleLossBlockFunction:
         self.loss_start = max_count * warmup
         self.itr = max_count
         self.p = p
-
+        self.total_loss = self.rec_loss = self.round_loss_val = self.b = 0
+        
         self.temp_decay = LinearTempDecayShift(max_count, rel_start_decay=warmup + (1 - warmup) * decay_start,
                                           start_b=b_range[0], end_b=b_range[1])
         self.count = 0
@@ -159,7 +213,7 @@ class ScaleLossBlockFunction:
         :return: total loss function
         """
         rec_loss = lp_loss(pred, tgt, p=self.p)
-
+        
         b = self.temp_decay(self.count)
         if self.count < self.loss_start or self.round_loss == 'none':
             b = round_loss = 0
@@ -167,17 +221,31 @@ class ScaleLossBlockFunction:
             round_loss = 0
             for name, module in self.block.named_modules():
                 if isinstance(module, QuantModule):
-                    round_vals = module.weight_quantizer.get_soft_targets()
-                    round_loss += self.lmda * (1 - ((round_vals - .5).abs() * 2).pow(b)).sum()
+                    # round_vals = module.weight_quantizer.get_soft_targets()
+                    round_vals = module.weight_quantizer.get_sig_soft_targets()
+                    # round_loss += self.lmda * (1 - ((round_vals - .5).abs() * 2).pow(b)).sum()
+                    # round_vals[round_vals] = 1e-10 # to avoid nan
+                    round_loss += self.lmda * (- torch.sum(round_vals * torch.log(round_vals+1e-10)))
+                    
         else:
             raise NotImplementedError
 
         total_loss = rec_loss + round_loss
-        if self.count % 500 == 0 or (self.itr-1 == self.count):
-            print('Total loss:\t{:.6f} (rec:{:.6f}, round:{:.6f})\tb={:.2f}\tcount={}'.format(
-                  float(total_loss), float(rec_loss), float(round_loss), b, self.count))
+        
+        #For report
+        self.total_loss = total_loss.item()
+        self.rec_loss = rec_loss.item()
+        self.round_loss_val = round_loss
+        self.b = b
+        # if self.count % 500 == 0 or (self.itr-1 == self.count):
+        #     print('Total loss:\t{:.6f} (rec:{:.6f}, round:{:.6f})\tb={:.2f}\tcount={}'.format(
+        #           float(total_loss), float(rec_loss), float(round_loss), b, self.count))
         self.count += 1
         return total_loss
+
+    def report(self):
+        return 'Total loss:\t{:.6f} (rec:{:.6f}, round:{:.6f})\tb={:.2f}'.format(
+                float(self.total_loss), float(self.rec_loss), float(self.round_loss_val), self.b)
         
 class ScaleLossFunction:
     def __init__(self,
@@ -196,6 +264,7 @@ class ScaleLossFunction:
         self.loss_start = max_count * warmup
         self.itr = max_count
         self.p = p
+        self.total_loss = self.rec_loss = self.round_loss_val = self.b = 0
 
         self.temp_decay = LinearTempDecayShift(max_count, rel_start_decay=warmup + (1 - warmup) * decay_start,
                                           start_b=b_range[0], end_b=b_range[1])
@@ -219,17 +288,30 @@ class ScaleLossFunction:
             b = round_loss = 0
         elif self.round_loss == 'relaxation':
             round_loss = 0
-            round_vals = self.layer.weight_quantizer.get_soft_targets()
-            round_loss += self.lmda * (1 - ((round_vals - .5).abs() * 2).pow(b)).sum()
+            # round_vals = self.layer.weight_quantizer.get_soft_targets()
+            round_vals = self.layer.weight_quantizer.get_sig_soft_targets()
+            # round_loss += self.lmda * (1 - ((round_vals - .5).abs() * 2).pow(b)).sum()
+            # round_vals[round_vals] = 1e-10 # to avoid nan
+            round_loss += self.lmda * (- torch.sum(round_vals * torch.log(round_vals+1e-10)))
         else:
             raise NotImplementedError
 
         total_loss = rec_loss + round_loss
-        if self.count % 500 == 0 or (self.itr-1 == self.count):
-            print('Total loss:\t{:.6f} (rec:{:.6f}, round:{:.6f})\tb={:.2f}\tcount={}'.format(
-                  float(total_loss), float(rec_loss), float(round_loss), b, self.count))
+        # if self.count % 500 == 0 or (self.itr-1 == self.count):
+        #     print('Total loss:\t{:.6f} (rec:{:.6f}, round:{:.6f})\tb={:.2f}\tcount={}'.format(
+        #           float(total_loss), float(rec_loss), float(round_loss), b, self.count))
+            
+        self.total_loss = total_loss.item()
+        self.rec_loss = rec_loss.item()
+        self.round_loss_val = round_loss
+        self.b = b
+        
         self.count += 1
         return total_loss
+    
+    def report(self):
+        return 'Total loss:\t{:.6f} (rec:{:.6f}, round:{:.6f})\tb={:.2f}'.format(
+                float(self.total_loss), float(self.rec_loss), float(self.round_loss_val), self.b)
     
 class LinearTempDecayShift:
     def __init__(self, t_max: int, rel_start_decay: float = 0.2, start_b: int = 10, end_b: int = 2):

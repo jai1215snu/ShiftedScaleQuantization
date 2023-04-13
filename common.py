@@ -18,7 +18,7 @@ def loadArgments():
     parser.add_argument('--data_path', default='~/dataset/cifar10', type=str, help='path to Cifar10 data', required=False)
 
     # quantization parameters
-    parser.add_argument('--n_bits_w', default=2, type=int, help='bitwidth for weight quantization')
+    parser.add_argument('--n_bits_w', default=4, type=int, help='bitwidth for weight quantization')
     parser.add_argument('--channel_wise', default=True, type=bool, help='apply channel_wise quantization for weights')
     parser.add_argument('--n_bits_a', default=4, type=int, help='bitwidth for activation quantization')
     parser.add_argument('--act_quant', default=True, help='apply activation quantization', type=bool)
@@ -32,7 +32,7 @@ def loadArgments():
     parser.add_argument('--sym', default=True, type=bool, help='symmetric reconstruction, not recommended')
     parser.add_argument('--b_start', default=20, type=int, help='temperature at the beginning of calibration')
     parser.add_argument('--b_end', default=2, type=int, help='temperature at the end of calibration')
-    parser.add_argument('--warmup', default=0.2, type=float, help='in the warmup period no regularization is applied')
+    parser.add_argument('--warmup', default=0.5, type=float, help='in the warmup period no regularization is applied')
     parser.add_argument('--step', default=20, type=int, help='record snn output per step')
 
     # activation calibration parameters

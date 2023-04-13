@@ -45,10 +45,10 @@ class UniformAffineQuantizer(nn.Module):
     :param scale_method: determines the quantization scale and zero point
     """
     def __init__(self, n_bits: int = 8, symmetric: bool = False, channel_wise: bool = False, scale_method: str = 'max',
-                 leaf_param: bool = False, tune_delta_zero: bool = False, ch: int = 64):
+                 leaf_param: bool = False, tune_delta_zero: bool = False, ch: int = 64, disable_act_quant: bool = False):
         super(UniformAffineQuantizer, self).__init__()
         self.sym = symmetric
-        assert 2 <= n_bits <= 8, 'bitwidth not supported'
+        assert 1 <= n_bits <= 8, 'bitwidth not supported'
         self.n_bits = n_bits
         self.n_levels = 2 ** self.n_bits
         self.delta = None
@@ -57,9 +57,13 @@ class UniformAffineQuantizer(nn.Module):
         self.leaf_param = leaf_param
         self.channel_wise = channel_wise
         self.scale_method = scale_method
+        self.disable_act_quant = disable_act_quant
         
-        if not tune_delta_zero:
-            if type(ch) is int:
+        if not tune_delta_zero and not disable_act_quant:
+            if leaf_param:
+                self.delta = torch.nn.Parameter(torch.tensor(0.0))
+                self.zero_point = torch.nn.Parameter(torch.tensor(0.0))
+            elif type(ch) is int:
                 self.delta = torch.nn.Parameter(torch.zeros(size=(ch,1)))
                 self.zero_point = torch.nn.Parameter(torch.zeros(size=(ch,1)))
             elif len(ch) == 2:
@@ -68,14 +72,13 @@ class UniformAffineQuantizer(nn.Module):
             else:
                 self.delta = torch.nn.Parameter(torch.zeros(size=(ch[0],1,1,1)))
                 self.zero_point = torch.nn.Parameter(torch.zeros(size=(ch[0],1,1,1)))
-            
 
     def forward(self, x: torch.Tensor):
         if self.inited is False:
             if self.leaf_param:
-                delta, self.zero_point = self.init_quantization_scale(x, self.channel_wise)
+                delta, zero_point = self.init_quantization_scale(x, self.channel_wise)
                 self.delta = torch.nn.Parameter(delta)
-                self.zero_point = torch.nn.Parameter(self.zero_point)
+                self.zero_point = torch.nn.Parameter(zero_point)
             else:
                 self.delta, self.zero_point = self.init_quantization_scale(x, self.channel_wise)
             
@@ -197,6 +200,7 @@ class QuantModule(nn.Module):
         # initialize quantizer
         weight_quant_params['ch'] = self.weight.shape
         self.weight_quantizer = UniformAffineQuantizer(**weight_quant_params)
+        act_quant_params['disable_act_quant'] = disable_act_quant
         self.act_quantizer = UniformAffineQuantizer(**act_quant_params)
 
         self.activation_function = StraightThrough()
@@ -266,6 +270,7 @@ class QuantModule(nn.Module):
 
     def set_quant_init_state(self):
         self.weight_quantizer.inited = True
+        self.act_quantizer.inited = True
         
     def set_quant_state(self, weight_quant: bool = False, act_quant: bool = False):
         self.use_weight_quant = weight_quant
