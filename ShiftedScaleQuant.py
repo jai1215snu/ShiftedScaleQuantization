@@ -1,6 +1,7 @@
 #Training Set
 import torch.nn as nn
 from data.cifar10 import build_cifar10_data
+from data.imagenet import build_imagenet_data
 from quant.quant_layer import QuantModule
 from quant.quant_block import BaseQuantBlock, QuantBasicBlock
 import pickle
@@ -51,8 +52,12 @@ def restore_ShiftedChannelQuant(model, layers, prv_name='', path='./temp/greedyL
 def run_ShiftRecon(model, curName, module, qnn, test_loader, act=False, **kwargs):
     if isinstance(module, QuantModule):
         layer_recon_shiftedScale(module, kwargs['iters'], kwargs['lmda'], qnn, test_loader, act)
+        if not act:
+            layer_recon_shiftedScale(module, kwargs['iters']*4, 0.001, qnn, test_loader, act, adaround=True)
     elif isinstance(module, QuantBasicBlock):
         block_recon_shiftedScale(module, kwargs['iters'], kwargs['lmda'], qnn, test_loader, act)
+        if not act:
+            block_recon_shiftedScale(module, kwargs['iters']*4, 0.001, qnn, test_loader, act, adaround=True)
     else:
         raise ValueError('Not supported reconstruction module type: {}'.format(type(module)))
                 
@@ -96,6 +101,7 @@ def channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, subArgs, a
     msg = f'Starting with {k_lmda} & {k_iters} & {subArgs["shiftTarget"]}'
     bot.sendMessage(chat_id=botInfo['id'], text=msg)
     build_ShiftedChannelQuant(qnn, layerEnabled, '', delta=1100, **kwargs) #set All Layers
+    exit(1)
     qnn.set_quant_state(False, False)# Default Setting
     
     # print(cali_data.shape)
@@ -195,35 +201,36 @@ def channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, subArgs, ar
         print(f'accuracy of qnn_hard{layer:28s}    : {validate_model(test_loader, qnn):.3f}')
         
 if __name__ == '__main__':
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     #Ready For Simulation
     args = loadArgments()
+    device = torch.device(args.run_device if torch.cuda.is_available() else 'cpu')
     seed_all(args.seed)
-    args.num_samples = 512
-    train_loader, test_loader = build_cifar10_data(batch_size=args.batch_size, workers=args.workers,
-                                                    data_path=args.data_path)
+    
+    if args.dataset == 'cifar10':
+        train_loader, test_loader = build_cifar10_data(batch_size=args.batch_size, workers=args.workers,
+                                                        data_path=args.data_path)
+    elif args.dataset == 'imagenet':
+        train_loader, test_loader = build_imagenet_data(batch_size=args.batch_size, workers=args.workers,
+                                                        data_path=args.data_path)    
+    
+
     cali_data  = get_train_samples(train_loader, num_samples=args.num_samples)
     
     #Telegram Bot setting.
-    botInfo = {'token':'5820626937:AAHHsvT__T7xkCiLujwi799CyMoWtwNkbTM', 'id':'5955354823'}
+    botInfo = {'token':'5820626937:AAHHsvT__T7xkCiLujwi799CyMoWtwNkbTM', 'id':'5955354823'} if args.msg_bot_enable else None
 
-    # channelRandomizeTest(test_loader, cali_data, args)
-    # channelGreedyTest(test_loader, cali_data, args)
-    # channelDistTest(test_loader, cali_data, args)
-    # channelGreedyTest_wLoss(test_loader, cali_data, botInfo, args)
-    # itr = 20000
-    # lmda = 5
+    #Add these to common parameters
     itr = 4000
     lmda = 5
     shiftTarget = [1/2, 2/2]
     # # # for itr in [1000, 4000, 8000]:
-    # for lmda in range(6, 10):
-    kwargs = dict()
-    kwargs['iters'] = itr
-    kwargs['lmda'] = (10)**(-lmda)
-    kwargs['shiftTarget'] = shiftTarget
-    qnn = channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, kwargs, args)
-    channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, kwargs, args)
+    for lmda in range(5, 7):
+        kwargs = dict()
+        kwargs['iters'] = itr
+        kwargs['lmda'] = (10)**(-lmda)
+        kwargs['shiftTarget'] = shiftTarget
+        qnn = channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, kwargs, args)
+    # channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, kwargs, args)
     
     #Init Data
     # init_delta_zero(args, cali_data, test_loader)

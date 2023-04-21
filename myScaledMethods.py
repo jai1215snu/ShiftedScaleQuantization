@@ -5,6 +5,8 @@ from quant.quant_layer import QuantModule, UniformAffineQuantizer
 from quant.quant_block import BaseQuantBlock, QuantBasicBlock
 import pandas as pd
 from pretrained.PyTorch_CIFAR10.cifar10_models.resnet import resnet18
+from models.resnet import resnet18 as resnet18_imagenet
+
 from quant.channelQuant import ChannelQuant
 from tqdm import tqdm
 import telegram
@@ -181,7 +183,11 @@ def run_GreedyLoss(model, curName, layer, **kwargs):
         pickle.dump(layer.weight_quantizer.shiftedScale, f)
         
 def init_delta_zero(args, cali_data, test_loader):
-    cnn = resnet18(pretrained=True, device='cuda:0')
+    if args.dataset == 'cifar10':
+        cnn = resnet18(pretrained=True, device=args.run_device)
+    elif args.dataset == 'imagenet':
+        cnn = resnet18_imagenet(pretrained=True, device=args.run_device)
+        
     cnn.cuda()
     cnn.eval()
     if not args.skip_test:
@@ -234,9 +240,7 @@ def build_qnn(args, test_loader):
     #Only Weight Quantization
     # qnn.load_state_dict(torch.load(f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth'))
     qnn.load_state_dict(torch.load(f'./checkPoint/QNN_CW_W{args.n_bits_w}_A{args.n_bits_a}.pth'))
-    # qnn.set_quant_state(True, False)# For weight scale/zp initialization
-    # _ = qnn(cali_data[:64].to(device))
-    qnn.set_quant_init_state() #weight_quantizer.inited = True
+    qnn.set_quant_init_state() #set weight_quantizer.inited = True
     
     if not args.skip_test:
         print(f'accuracy of qnn    : {validate_model(test_loader, qnn):.3f}')

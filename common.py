@@ -18,7 +18,7 @@ def loadArgments():
     parser.add_argument('--data_path', default='~/dataset/cifar10', type=str, help='path to Cifar10 data', required=False)
 
     # quantization parameters
-    parser.add_argument('--n_bits_w', default=4, type=int, help='bitwidth for weight quantization')
+    parser.add_argument('--n_bits_w', default=2, type=int, help='bitwidth for weight quantization')
     parser.add_argument('--channel_wise', default=True, type=bool, help='apply channel_wise quantization for weights')
     parser.add_argument('--n_bits_a', default=4, type=int, help='bitwidth for activation quantization')
     parser.add_argument('--act_quant', default=True, help='apply activation quantization', type=bool)
@@ -42,8 +42,11 @@ def loadArgments():
     
     #choigj
     parser.add_argument('--skip_test', default=True, type=bool, help='skip default test')
+    parser.add_argument('--run_device', default='cuda:0', type=str, help='gpu usage')
+    parser.add_argument('--msg_bot_enable', default=True, type=bool, help='use messaging bot for monitoring')
+    parser.add_argument('--make_init_data', default=False, type=bool, help='Make Initiallize weight data')
+    parser.add_argument('--dataset', default='cifar10', type=str, help='dataset name')
     
-
     return parser.parse_args()
     
 def seed_all(seed=1029):
