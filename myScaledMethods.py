@@ -186,9 +186,15 @@ def init_delta_zero(args, cali_data, test_loader):
     if args.dataset == 'cifar10':
         cnn = resnet18(pretrained=True, device=args.run_device)
     elif args.dataset == 'imagenet':
-        cnn = resnet18_imagenet(pretrained=True, device=args.run_device)
+        cnn = resnet18_imagenet()
+        state_dict = torch.load(
+            './pretrained/Pytorch_imagenet/resnet18_imagenet.pth.tar', map_location='cpu'
+        )
+        cnn.load_state_dict(state_dict)
+        print("model Loaded",  './pretrained/Pytorch_imagenet/resnet18_imagenet.pth.tar', 'cpu')
         
-    cnn.cuda()
+    # cnn.cuda()
+    cnn.to(args.run_device)
     cnn.eval()
     if not args.skip_test:
         print(f'accuracy of original : {validate_model(test_loader, cnn):.3f}')
@@ -197,13 +203,14 @@ def init_delta_zero(args, cali_data, test_loader):
     wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'tune_delta_zero':True, 'leaf_param':True} #NOTE: tune_delta_zero is True
     aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'tune_delta_zero':True, 'leaf_param': args.act_quant}
     qnn = QuantModel(model=cnn, weight_quant_params=wq_params, act_quant_params=aq_params)
-    qnn.cuda()
+    # qnn.cuda()
+    qnn.to(args.run_device)
     qnn.eval()
     if not args.disable_8bit_head_stem:
         print('Setting the first and the last layer to 8-bit')
         qnn.set_first_last_layer_to_8bit()
     # qnn.set_quant_state(True, False)# For weight scale/zp initialization
-    # _ = qnn(cali_data[:64].to('cuda:0'))
+    # _ = qnn(cali_data[:64].to(args.run_device))
     
     # params_dict = {}
     # for name, param in qnn.named_parameters():
@@ -214,16 +221,27 @@ def init_delta_zero(args, cali_data, test_loader):
     # torch.save(params_dict, f'./QNN_CW_W{args.n_bits_w}_FP32.pth')
     
     qnn.set_quant_state(True, True)# For weight scale/zp initialization
-    _ = qnn(cali_data[:64].to('cuda:0'))
+    _ = qnn(cali_data[:64].to(args.run_device))
     params_dict = {}
     for name, param in qnn.named_parameters():    # for name, param in qnn.named_parameters():
         print("torch saving ", name, param.data.shape)
         params_dict[name] = param.data
-    torch.save(params_dict, f'./QNN_CW_W{args.n_bits_w}_A{args.n_bits_a}.pth')
+    
+    if args.dataset == 'cifar10':
+        prefix = 'CIFAR10'
+    elif args.dataset == 'imagenet':
+        prefix = 'IMAGENET'
+    torch.save(params_dict, f'./{prefix}_QNN_CW_W{args.n_bits_w}_A{args.n_bits_a}.pth')
         
 def build_qnn(args, test_loader):
-    cnn = resnet18(pretrained=True, device='cuda:0')
-    cnn.cuda()
+    if args.dataset == 'cifar10':
+        cnn = resnet18(pretrained=True, device=args.run_device)
+    elif args.dataset == 'imagenet':
+        cnn = resnet18_imagenet()
+        state_dict = torch.load('./pretrained/Pytorch_imagenet/resnet18_imagenet.pth.tar', map_location='cpu')
+        cnn.load_state_dict(state_dict)
+    # cnn.cuda()
+    cnn.to(args.run_device)
     cnn.eval()
     if not args.skip_test:
         print(f'accuracy of original : {validate_model(test_loader, cnn):.3f}')
@@ -232,14 +250,19 @@ def build_qnn(args, test_loader):
     wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'tune_delta_zero':False}
     aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'tune_delta_zero':False, 'leaf_param': True}
     qnn = QuantModel(model=cnn, weight_quant_params=wq_params, act_quant_params=aq_params)
-    qnn.cuda()
+    # qnn.cuda()
+    qnn.to(args.run_device)
     qnn.eval()
     if not args.disable_8bit_head_stem:
         print('Setting the first and the last layer to 8-bit')
         qnn.set_first_last_layer_to_8bit()
     #Only Weight Quantization
     # qnn.load_state_dict(torch.load(f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth'))
-    qnn.load_state_dict(torch.load(f'./checkPoint/QNN_CW_W{args.n_bits_w}_A{args.n_bits_a}.pth'))
+    if args.dataset == 'cifar10':
+        prefix = 'CIFAR10'
+    elif args.dataset == 'imagenet':
+        prefix = 'IMAGENET'
+    qnn.load_state_dict(torch.load(f'./checkPoint/{prefix}_QNN_CW_W{args.n_bits_w}_A{args.n_bits_a}.pth'))
     qnn.set_quant_init_state() #set weight_quantizer.inited = True
     
     if not args.skip_test:
@@ -357,7 +380,7 @@ def channelDistTest(test_loader, cali_data, args):
 
 def channelRandomizeTest(test_loader, cali_data, args):
     # ratio = [0.01,0.02,0.04,0.08,0.1,0.2,0.3,0.4,0.5,0.75,1.0]
-    ratio = [0.01]
+    ratio = [0.201]
     
     kwargs = dict(
         cali_data=cali_data, 

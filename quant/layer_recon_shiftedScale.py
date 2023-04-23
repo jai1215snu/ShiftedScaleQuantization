@@ -7,18 +7,128 @@ import pickle
 import torch.nn as nn
 import common
 import torch.optim.lr_scheduler as lr_scheduler
-from tqdm import tqdm
+from tqdm import tqdm, trange
 
-def block_recon_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: float = 1., model=None, test_loader=None, act=False, adaround=False):
+
+# def block_recon_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: float = 1., model=None, test_loader=None, act=False, adaround=False, useShiftedScale=True):
+#     block.train()
+#     warmup = 0.5
+#     p = 2.0
+#     b_range = (20, 2)
+#     # device = torch.device('cuda')
+#     device = next(model.parameters()).device
+#     # lr = 0.0001
+#     lr = 4e-4
+    
+#     opt_params = []
+#     if act:
+#         #Init setting for all weight quantizer
+#         for name, module in block.named_modules():
+#             if isinstance(module, QuantModule):
+#                 if module.act_quantizer.disable_act_quant:
+#                     continue
+#                 opt_params += [module.act_quantizer.delta]
+#             elif isinstance(module, UniformAffineQuantizer):
+#                 if module.disable_act_quant:
+#                     continue
+#                 opt_params += [module.delta]
+#         optimizer = torch.optim.Adam(opt_params, lr=lr)
+#         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=iters, eta_min=0.)
+#     else:
+#         #Init setting for all weight quantizer
+#         for name, module in block.named_modules():
+#             if isinstance(module, QuantModule):
+#                 # if not module.weight_quantizer.shiftedDone:
+#                 if adaround:
+#                     opt_params += [module.weight_quantizer.beta]
+#                     module.weight_quantizer.round_mode = 'adaround'
+#                     if useShiftedScale:
+#                         module.weight_quantizer.update_delta()
+#                 else:
+#                     opt_params += [module.weight_quantizer.alpha]
+#                     module.weight_quantizer.opt_mode = 'learned_hard_sigmoid'
+#         optimizer = torch.optim.Adam(opt_params)
+#         scheduler = None
+#         # scheduler = lr_scheduler.StepLR(optimizer, step_size=iters*, gamma=0.3)
+#         # warmup = 0
+#         opt_param_num = sum([p.numel() for p in opt_params])
+#         print("number of elements in opt_params: {}".format(opt_param_num))
+        
+#     loss_mode = 'none' if act else 'relaxation'
+    
+#     # lmda = lmda * opt_param_num
+#     loss_func = ScaleLossBlockFunction(block, round_loss=loss_mode, lmda=lmda,
+#                             max_count=iters, b_range=b_range,
+#                             decay_start=0, warmup=warmup, p=p, adaround=adaround)
+    
+#     cached_inp = torch.cat(block.cached_inp_features)
+#     cached_out = torch.cat(block.cached_out_features)
+#     batch_size = 64
+    
+#     for i in trange(iters, dynamic_ncols=True):
+#         idx = torch.randperm(cached_inp.size(0))[:batch_size]
+        
+#         cur_inp = cached_inp[idx].to(device)
+#         cur_out = cached_out[idx].to(device)
+        
+#         optimizer.zero_grad()
+#         quant_out = block(cur_inp)
+        
+#         err = loss_func(quant_out, cur_out)
+#         err.backward(retain_graph=True)
+#         optimizer.step()
+#         if scheduler is not None:
+#             scheduler.step()
+            
+#         if i%500 == 0:
+#             model.store_quantization_state()
+#             model.set_quant_state(True, act)# For Accuracy test
+#             if act:
+#                 hard_acc = common.validate_model(test_loader, model, simple=True)
+#                 result_message = f'accuracy [{i:5d} / {iters:5d}] : {hard_acc:.3f} {loss_func.report()}'
+#             else:
+#                 soft_acc = common.validate_model(test_loader, model, simple=True)
+#                 hard_acc = soft_acc
+#                 # for name, module in block.named_modules():
+#                 #     if isinstance(module, QuantModule):
+#                 #         if adaround:
+#                 #             module.weight_quantizer.hard_round = True
+#                 #         else:
+#                 #             module.weight_quantizer.hard_targets = True
+#                 # hard_acc = common.validate_model(test_loader, model, simple=True)
+#                 # for name, module in block.named_modules():
+#                 #     if isinstance(module, QuantModule):
+#                 #         if adaround:
+#                 #             module.weight_quantizer.hard_round = False
+#                 #         else:
+#                 #             module.weight_quantizer.hard_targets = False
+#                 result_message = f'accuracy [{i:5d} / {iters:5d}] : {soft_acc:.3f}/{hard_acc:.3f} {loss_func.report()}'
+#             print(result_message)
+#             model.restore_quantization_state()
+        
+#     if not act:
+#         for name, module in block.named_modules():
+#             if isinstance(module, QuantModule):
+#                 if adaround:
+#                     module.weight_quantizer.hard_round = True
+#                 else:
+#                     module.weight_quantizer.hard_targets = True
+#                     module.weight_quantizer.shiftedDone = True
+                
+#     torch.cuda.empty_cache()
+#     model.eval()
+
+def block_recon_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: float = 1., model=None, test_loader=None, act=False, adaround=False, useShiftedScale=True):
     block.train()
     warmup = 0.5
     p = 2.0
     b_range = (20, 2)
-    device = torch.device('cuda')
-    lr = 0.0001
+    # device = torch.device('cuda')
+    device = next(model.parameters()).device
+    # lr = 0.0001
+    lr = 4e-4
     
     opt_params = []
-    
     if act:
         #Init setting for all weight quantizer
         for name, module in block.named_modules():
@@ -40,7 +150,8 @@ def block_recon_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: fl
                 if adaround:
                     opt_params += [module.weight_quantizer.beta]
                     module.weight_quantizer.round_mode = 'adaround'
-                    module.weight_quantizer.update_delta()
+                    if useShiftedScale:
+                        module.weight_quantizer.update_delta()
                 else:
                     opt_params += [module.weight_quantizer.alpha]
                     module.weight_quantizer.opt_mode = 'learned_hard_sigmoid'
@@ -60,12 +171,18 @@ def block_recon_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: fl
     
     cached_inp = torch.cat(block.cached_inp_features)
     cached_out = torch.cat(block.cached_out_features)
-    batch_size = 128
+    batch_size = 64
     
     target = []
     sub_iter = cached_inp.size(0)//batch_size
-    for i in range(iters//sub_iter):
+    total_idx = iters//sub_iter
+    
+    start_loss = 0.0
+    t = tqdm(range(total_idx), desc=f'', dynamic_ncols=True)
+    
+    for i in t:
         permIdx = torch.randperm(cached_inp.size(0))
+        
         for k in range(sub_iter):
             idx = permIdx[batch_size*k:batch_size*(k+1)]
             cur_inp = cached_inp[idx].to(device)
@@ -80,35 +197,40 @@ def block_recon_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: fl
             if scheduler is not None:
                 scheduler.step()
                 
-        if i%50 == 0 and not act and not adaround:
-            target.append(block.conv1.weight_quantizer.get_sig_soft_targets().detach().cpu().numpy())
+            run_idx = (i*sub_iter)+k
+            if run_idx%500 == 0:
+                start_loss = max(start_loss, loss_func.rec_loss)
+                t.set_description(f"{start_loss:.6f} -> {loss_func.rec_loss:.6f} {loss_func.round_loss_val:.3f} ")
                 
-        if i%100 == 0:
-            model.store_quantization_state()
-            model.set_quant_state(True, act)# For Accuracy test
-            if act:
-                hard_acc = common.validate_model(test_loader, model)
-                result_message = f'accuracy [{i:5d} / {iters//sub_iter:5d}] : {hard_acc:.3f} {loss_func.report()}'
-            else:
-                soft_acc = common.validate_model(test_loader, model)
+        # if i%50 == 0 and not act and not adaround:
+            # target.append(block.conv1.weight_quantizer.get_sig_soft_targets().detach().cpu().numpy())
+
+        # if run_idx%50 == 0:
+            # model.store_quantization_state()
+            # model.set_quant_state(True, act)# For Accuracy test
+            # if act:
+            #     hard_acc = common.validate_model(test_loader, model, simple=True)
+            #     result_message = f'accuracy [{i:5d} / {run_idx:5d}] : {hard_acc:.3f} {loss_func.report()}'
+            # else:
+            #     soft_acc = common.validate_model(test_loader, model, simple=True)
+            #     hard_acc = soft_acc
+                # for name, module in block.named_modules():
+                #     if isinstance(module, QuantModule):
+                #         if adaround:
+                #             module.weight_quantizer.hard_round = True
+                #         else:
+                #             module.weight_quantizer.hard_targets = True
+                # hard_acc = common.validate_model(test_loader, model, simple=True)
+                # for name, module in block.named_modules():
+                #     if isinstance(module, QuantModule):
+                #         if adaround:
+                #             module.weight_quantizer.hard_round = False
+                #         else:
+                #             module.weight_quantizer.hard_targets = False
+                # result_message = f'accuracy [{i:5d} / {run_idx:5d}] : {soft_acc:.3f}/{hard_acc:.3f} {loss_func.report()}'
                 
-                for name, module in block.named_modules():
-                    if isinstance(module, QuantModule):
-                        if adaround:
-                            module.weight_quantizer.hard_round = True
-                        else:
-                            module.weight_quantizer.hard_targets = True
-                hard_acc = common.validate_model(test_loader, model)
-                for name, module in block.named_modules():
-                    if isinstance(module, QuantModule):
-                        if adaround:
-                            module.weight_quantizer.hard_round = False
-                        else:
-                            module.weight_quantizer.hard_targets = False
-                result_message = f'accuracy [{i:5d} / {iters//sub_iter:5d}] : {soft_acc:.3f}/{hard_acc:.3f} {loss_func.report()}'
-                
-            print(result_message)
-            model.restore_quantization_state()
+            # print(result_message)
+            # model.restore_quantization_state()
     
     if not act:
         for name, module in block.named_modules():
@@ -119,14 +241,14 @@ def block_recon_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: fl
                     module.weight_quantizer.hard_targets = True
                     module.weight_quantizer.shiftedDone = True
                 
-        with open(f'./temp/param.pkl', 'wb') as f:
-            target = np.array(target)
-            pickle.dump(target, f)
+        # with open(f'./temp/param.pkl', 'wb') as f:
+        #     target = np.array(target)
+        #     pickle.dump(target, f)
     
     torch.cuda.empty_cache()
     model.eval()
 
-def layer_recon_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: float = 1., model=None, test_loader=None, act=False, adaround=False):
+def layer_recon_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: float = 1., model=None, test_loader=None, act=False, adaround=False, useShiftedScale=True):
     model.train()
     
     warmup = 0.5
@@ -138,7 +260,8 @@ def layer_recon_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: float
     if adaround:
         opt_params = [layer.weight_quantizer.beta]
         layer.weight_quantizer.round_mode = 'adaround'
-        layer.weight_quantizer.update_delta()
+        if useShiftedScale:
+            layer.weight_quantizer.update_delta()
     else:
         opt_params = [layer.weight_quantizer.alpha]
         layer.weight_quantizer.opt_mode = 'learned_hard_sigmoid'
@@ -151,7 +274,7 @@ def layer_recon_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: float
     
     cached_inp = torch.cat(layer.cached_inp_features)
     cached_out = torch.cat(layer.cached_out_features)
-    batch_size = 128
+    batch_size = 64
     
     target = []
     sub_iter = cached_inp.size(0)//batch_size
@@ -172,22 +295,23 @@ def layer_recon_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: float
             if scheduler is not None:
                 scheduler.step()
             # print(i, layer.weight_quantizer.get_soft_targets()[0])
-        if i%50 == 0:
-            target.append(layer.weight_quantizer.get_sig_soft_targets().detach().cpu().numpy())
-        if i%100 == 0:
+        # if i%50 == 0:
+        #     target.append(layer.weight_quantizer.get_sig_soft_targets().detach().cpu().numpy())
+        if i%500 == 0:
             model.store_quantization_state()
             model.set_quant_state(True, False)# For Accuracy test
-            soft_acc = common.validate_model(test_loader, model)
+            soft_acc = common.validate_model(test_loader, model, simple=True)
+            hard_acc = soft_acc
             
-            if adaround:
-                layer.weight_quantizer.hard_round = True
-            else:
-                layer.weight_quantizer.hard_targets = True
-            hard_acc = common.validate_model(test_loader, model)
-            if adaround:
-                layer.weight_quantizer.hard_round = False
-            else:
-                layer.weight_quantizer.hard_targets = True
+            # if adaround:
+            #     layer.weight_quantizer.hard_round = True
+            # else:
+            #     layer.weight_quantizer.hard_targets = True
+            # hard_acc = common.validate_model(test_loader, model, simple=True)
+            # if adaround:
+            #     layer.weight_quantizer.hard_round = False
+            # else:
+            #     layer.weight_quantizer.hard_targets = True
         
             result_message = f'accuracy [{i:5d}/{iters//sub_iter:5d}] : {soft_acc:.3f} / {hard_acc:.3f} {loss_func.report()}'
             print(result_message)
@@ -197,9 +321,9 @@ def layer_recon_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: float
     if adaround:
         layer.hard_round = True
     else:
-        with open(f'./temp/param.pkl', 'wb') as f:
-            target = np.array(target)
-            pickle.dump(target, f)
+        # with open(f'./temp/param.pkl', 'wb') as f:
+        #     target = np.array(target)
+        #     pickle.dump(target, f)
         layer.weight_quantizer.hard_targets = True
         layer.weight_quantizer.shiftedDone = True
     

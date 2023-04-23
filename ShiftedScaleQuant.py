@@ -50,14 +50,20 @@ def restore_ShiftedChannelQuant(model, layers, prv_name='', path='./temp/greedyL
             restore_ShiftedChannelQuant(module, layers, curName, path)
         
 def run_ShiftRecon(model, curName, module, qnn, test_loader, act=False, **kwargs):
+    iters_for_shift = kwargs['iters']
+    iters_for_round = kwargs['iters']*4
+    useShiftedScale = not kwargs['bypassChannelShift']
+    if kwargs['bypassChannelShift']:
+        iters_for_shift = 0
+    
     if isinstance(module, QuantModule):
-        layer_recon_shiftedScale(module, kwargs['iters'], kwargs['lmda'], qnn, test_loader, act)
+        layer_recon_shiftedScale(module, iters_for_shift, kwargs['lmda'], qnn, test_loader, act)
         if not act:
-            layer_recon_shiftedScale(module, kwargs['iters']*4, 0.001, qnn, test_loader, act, adaround=True)
+            layer_recon_shiftedScale(module, iters_for_round, 0.01, qnn, test_loader, act, adaround=True, useShiftedScale=useShiftedScale)
     elif isinstance(module, QuantBasicBlock):
-        block_recon_shiftedScale(module, kwargs['iters'], kwargs['lmda'], qnn, test_loader, act)
+        block_recon_shiftedScale(module, iters_for_shift, kwargs['lmda'], qnn, test_loader, act)
         if not act:
-            block_recon_shiftedScale(module, kwargs['iters']*4, 0.001, qnn, test_loader, act, adaround=True)
+            block_recon_shiftedScale(module, iters_for_round, 0.01, qnn, test_loader, act, adaround=True, useShiftedScale=useShiftedScale)
     else:
         raise ValueError('Not supported reconstruction module type: {}'.format(type(module)))
                 
@@ -77,6 +83,7 @@ def channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, subArgs, a
         eval=True,
         returnLoss=True,
         batch_size=args.batch_size,
+        bypassChannelShift=args.bypassChannelShift,
     )
     k_lmda = subArgs['lmda']
     k_iters = subArgs['iters']
@@ -97,16 +104,12 @@ def channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, subArgs, a
         '.model.fc',
     ]
     qnn = build_qnn(args, test_loader)
-    bot = telegram.Bot(token=botInfo['token'])
-    msg = f'Starting with {k_lmda} & {k_iters} & {subArgs["shiftTarget"]}'
-    bot.sendMessage(chat_id=botInfo['id'], text=msg)
+    bot = telegram.Bot(token=botInfo['token']) if botInfo is not None else None
+    msg = f'Starting with {k_lmda} & {k_iters} & {subArgs["shiftTarget"]} & WA{args.n_bits_w}/{args.n_bits_a}'
+    if bot is not None:
+        bot.sendMessage(chat_id=botInfo['id'], text=msg)
     build_ShiftedChannelQuant(qnn, layerEnabled, '', delta=1100, **kwargs) #set All Layers
-    exit(1)
     qnn.set_quant_state(False, False)# Default Setting
-    
-    # print(cali_data.shape)
-    # print(caliT_data.shape)
-    # exit(1)
     
     accuracys = []
     for layer in layerEnabled:
@@ -141,13 +144,14 @@ def channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, subArgs, a
         
         #Hard Result
         QuantRecursiveToggle_hardTarget(qnn, [layer], '', **kwargs)
-        accuracys += [validate_model(test_loader, qnn).cpu().numpy()]
-        print(f'accuracy of qnn_hard{layer:28s}    : {validate_model(test_loader, qnn):.3f}')
+        # accuracys += [validate_model(test_loader, qnn).cpu().numpy()]
+        # print(f'accuracy of qnn_hard{layer:28s}    : {validate_model(test_loader, qnn):.3f}')
         
         qnn.restore_quantization_state()
         ####---- Test Area ---- End   ####
         
-    bot.sendMessage(chat_id=botInfo['id'], text=str(np.array(accuracys)))
+    if bot is not None:
+        bot.sendMessage(chat_id=botInfo['id'], text=str(np.array(accuracys)))
     with open(f'./temp/accuracy_{k_lmda:.3e}_itr{k_iters}.pkl', 'wb') as f:
         pickle.dump(np.array(accuracys), f)
     return qnn
@@ -200,6 +204,7 @@ def channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, subArgs, ar
         accuracys += [validate_model(test_loader, qnn).cpu().numpy()]
         print(f'accuracy of qnn_hard{layer:28s}    : {validate_model(test_loader, qnn):.3f}')
         
+        
 if __name__ == '__main__':
     #Ready For Simulation
     args = loadArgments()
@@ -212,26 +217,26 @@ if __name__ == '__main__':
     elif args.dataset == 'imagenet':
         train_loader, test_loader = build_imagenet_data(batch_size=args.batch_size, workers=args.workers,
                                                         data_path=args.data_path)    
-    
-
+    # cnn = resnet18_imagenet()
+    # state_dict = torch.load('./pretrained/Pytorch_imagenet/resnet18_imagenet.pth.tar', map_location='cpu')
+    # cnn.load_state_dict(state_dict)
     cali_data  = get_train_samples(train_loader, num_samples=args.num_samples)
-    
+    if args.make_checkpoint:
+        init_delta_zero(args, cali_data, test_loader)
+        print("Making checkpoint data done")
+        exit(1)
     #Telegram Bot setting.
     botInfo = {'token':'5820626937:AAHHsvT__T7xkCiLujwi799CyMoWtwNkbTM', 'id':'5955354823'} if args.msg_bot_enable else None
 
-    #Add these to common parameters
-    itr = 4000
-    lmda = 5
-    shiftTarget = [1/2, 2/2]
+    # #Add these to common parameters
+    itr = 10000
+    lmda = 3
+    shiftTarget = [2/2, 1/2]
     # # # for itr in [1000, 4000, 8000]:
-    for lmda in range(5, 7):
-        kwargs = dict()
-        kwargs['iters'] = itr
-        kwargs['lmda'] = (10)**(-lmda)
-        kwargs['shiftTarget'] = shiftTarget
-        qnn = channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, kwargs, args)
+    kwargs = dict()
+    kwargs['iters'] = itr
+    kwargs['lmda'] = (10)**(-lmda)
+    kwargs['shiftTarget'] = shiftTarget
+    qnn = channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, kwargs, args)
     # channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, kwargs, args)
-    
-    #Init Data
-    # init_delta_zero(args, cali_data, test_loader)
     

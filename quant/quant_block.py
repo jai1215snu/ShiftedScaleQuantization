@@ -7,8 +7,9 @@ from models.resnet import BasicBlock, Bottleneck
 from models.regnet import ResBottleneckBlock
 from models.mobilenetv2 import InvertedResidual
 import sys
+#TODO: CIFAR10 models
 sys.path.append('..')
-from pretrained.PyTorch_CIFAR10.cifar10_models.resnet import BasicBlock
+from pretrained.PyTorch_CIFAR10.cifar10_models.resnet import BasicBlockCIFAR
 
 class BaseQuantBlock(nn.Module):
     """
@@ -241,6 +242,7 @@ class QuantInvertedResidual(BaseQuantBlock):
 
 specials = {
     BasicBlock: QuantBasicBlock,
+    BasicBlockCIFAR: QuantBasicBlock,
     Bottleneck: QuantBottleneck,
     ResBottleneckBlock: QuantResBottleneckBlock,
     InvertedResidual: QuantInvertedResidual,

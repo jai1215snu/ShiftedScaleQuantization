@@ -85,7 +85,6 @@ def layer_channelGreedy(model: QuantModel, layer: QuantModule, cali_data: torch.
                          multi_gpu: bool = False, eval: bool = False, shuffle_ratio: float = 0.0, qscale: float = 1.0):
     # Replace weight quantizer to channelWiseQuantizer
     layer.weight_quantizer = ChannelQuant(uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data, shuffle_ratio=0.0, qscale=qscale)
-    device = 'cuda'
     cached_inps, cached_outs = save_inp_oup_data(model, layer, cali_data, asym, act_quant, batch_size)
     
     idx = torch.randperm(cached_inps.size(0))[:batch_size]
@@ -230,50 +229,50 @@ def channelRandomizeTest(qnn, test_loader, cali_data, shuffle_ratio, args):
     with open(f'./results/channelRandomL0_only_1.2_fixed.{shuffle_ratio}.pkl', 'wb') as f:
         pickle.dump(testResult, f)
             
-if __name__ == '__main__':
-    ratios = [0.01, 0.02, 0.04, 0.08, 0.1, 0.2, 0.3, 0.4, 0.5, 0.8, 1.0]
-    # ratios = [0.1]
-    SKIP_TEST = False
-    QUANT_INIT = True
+# if __name__ == '__main__':
+#     ratios = [0.01, 0.02, 0.04, 0.08, 0.1, 0.2, 0.3, 0.4, 0.5, 0.8, 1.0]
+#     # ratios = [0.1]
+#     SKIP_TEST = False
+#     QUANT_INIT = True
     
-    args = loadArgments()
-    seed_all(args.seed)
-    train_loader, test_loader = build_cifar10_data(batch_size=args.batch_size, workers=args.workers,
-                                                    data_path=args.data_path)
+#     args = loadArgments()
+#     seed_all(args.seed)
+#     train_loader, test_loader = build_cifar10_data(batch_size=args.batch_size, workers=args.workers,
+#                                                     data_path=args.data_path)
 
-    for shuffle_ratio in ratios:
-        cnn = resnet18(pretrained=True, device='cuda:0')
-        cnn.cuda()
-        cnn.eval()
-        if not SKIP_TEST:
-            print(f'accuracy of original : {validate_model(test_loader, cnn):.3f}')
+#     for shuffle_ratio in ratios:
+#         cnn = resnet18(pretrained=True, device='cuda:0')
+#         cnn.cuda()
+#         cnn.eval()
+#         if not SKIP_TEST:
+#             print(f'accuracy of original : {validate_model(test_loader, cnn):.3f}')
         
-        # build quantization parameters
-        wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'CWQ':True}
-        aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'leaf_param': args.act_quant}
-        qnn = QuantModel(model=cnn, weight_quant_params=wq_params, act_quant_params=aq_params)
-        qnn.cuda()
-        qnn.eval()
-        if not args.disable_8bit_head_stem:
-            print('Setting the first and the last layer to 8-bit')
-            qnn.set_first_last_layer_to_8bit()
-        cali_data = get_train_samples(train_loader, num_samples=args.num_samples)
-        device = next(qnn.parameters()).device
+#         # build quantization parameters
+#         wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'CWQ':True}
+#         aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'leaf_param': args.act_quant}
+#         qnn = QuantModel(model=cnn, weight_quant_params=wq_params, act_quant_params=aq_params)
+#         qnn.cuda()
+#         qnn.eval()
+#         if not args.disable_8bit_head_stem:
+#             print('Setting the first and the last layer to 8-bit')
+#             qnn.set_first_last_layer_to_8bit()
+#         cali_data = get_train_samples(train_loader, num_samples=args.num_samples)
+#         device = next(qnn.parameters()).device
         
-        # # Initialize weight quantization parameters
-        qnn.set_quant_state(True, False)
-        if QUANT_INIT:
-            _ = qnn(cali_data[:64].to(device))
-            torch.save(qnn.state_dict(), f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth')
-            qnn.set_quant_init_state()
-        else:
-            qnn.load_state_dict(torch.load(f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth'))
+#         # # Initialize weight quantization parameters
+#         qnn.set_quant_state(True, False)
+#         if QUANT_INIT:
+#             _ = qnn(cali_data[:64].to(device))
+#             torch.save(qnn.state_dict(), f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth')
+#             qnn.set_quant_init_state()
+#         else:
+#             qnn.load_state_dict(torch.load(f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth'))
         
-        # st = torch.load(f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth')
-        if not SKIP_TEST:
-            print(f'Quantized accuracy before brecq: {validate_model(test_loader, qnn):.3f}')
-        exit(1)
-        #Load Weight
-        # channelRandomizeTest(qnn, test_loader, cali_data, shuffle_ratio, args)
-        # channelGreedyTest(qnn, test_loader, cali_data, args)
-        # break
+#         # st = torch.load(f'./checkPoint/QNN_CW_W{args.n_bits_w}_FP32.pth')
+#         if not SKIP_TEST:
+#             print(f'Quantized accuracy before brecq: {validate_model(test_loader, qnn):.3f}')
+#         exit(1)
+#         #Load Weight
+#         # channelRandomizeTest(qnn, test_loader, cali_data, shuffle_ratio, args)
+#         # channelGreedyTest(qnn, test_loader, cali_data, args)
+#         # break

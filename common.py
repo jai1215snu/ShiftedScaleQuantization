@@ -10,15 +10,16 @@ def loadArgments():
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     
     # general parameters for data and model
-    parser.add_argument('--seed', default=1005, type=int, help='random seed for results reproduction')
+    parser.add_argument('--seed', default=2023, type=int, help='random seed for results reproduction')
     parser.add_argument('--arch', default='resnet18', type=str, help='dataset name',
                         choices=['resnet18', 'resnet50', 'mobilenetv2', 'regnetx_600m', 'regnetx_3200m', 'mnasnet'])
-    parser.add_argument('--batch_size', default=128, type=int, help='mini-batch size for data loader')
+    parser.add_argument('--batch_size', default=64, type=int, help='mini-batch size for data loader')
     parser.add_argument('--workers', default=4, type=int, help='number of workers for data loader')
-    parser.add_argument('--data_path', default='~/dataset/cifar10', type=str, help='path to Cifar10 data', required=False)
+    # parser.add_argument('--data_path', default='~/dataset/cifar10', type=str, help='path to Cifar10 data', required=False)
+    parser.add_argument('--data_path', default='~/dataset/imagenet', type=str, help='path to Cifar10 data', required=False)
 
     # quantization parameters
-    parser.add_argument('--n_bits_w', default=2, type=int, help='bitwidth for weight quantization')
+    parser.add_argument('--n_bits_w', default=4, type=int, help='bitwidth for weight quantization')
     parser.add_argument('--channel_wise', default=True, type=bool, help='apply channel_wise quantization for weights')
     parser.add_argument('--n_bits_a', default=4, type=int, help='bitwidth for activation quantization')
     parser.add_argument('--act_quant', default=True, help='apply activation quantization', type=bool)
@@ -32,7 +33,7 @@ def loadArgments():
     parser.add_argument('--sym', default=True, type=bool, help='symmetric reconstruction, not recommended')
     parser.add_argument('--b_start', default=20, type=int, help='temperature at the beginning of calibration')
     parser.add_argument('--b_end', default=2, type=int, help='temperature at the end of calibration')
-    parser.add_argument('--warmup', default=0.5, type=float, help='in the warmup period no regularization is applied')
+    parser.add_argument('--warmup', default=0.2, type=float, help='in the warmup period no regularization is applied')
     parser.add_argument('--step', default=20, type=int, help='record snn output per step')
 
     # activation calibration parameters
@@ -41,11 +42,14 @@ def loadArgments():
     parser.add_argument('--p', default=2.4, type=float, help='L_p norm minimization for LSQ')
     
     #choigj
+    parser.add_argument('--make_checkpoint', default=False, type=bool, help='generate checkpoint')
     parser.add_argument('--skip_test', default=True, type=bool, help='skip default test')
     parser.add_argument('--run_device', default='cuda:0', type=str, help='gpu usage')
     parser.add_argument('--msg_bot_enable', default=True, type=bool, help='use messaging bot for monitoring')
     parser.add_argument('--make_init_data', default=False, type=bool, help='Make Initiallize weight data')
-    parser.add_argument('--dataset', default='cifar10', type=str, help='dataset name')
+    # parser.add_argument('--dataset', default='cifar10', type=str, help='dataset name')
+    parser.add_argument('--dataset', default='imagenet', type=str, help='dataset name')
+    parser.add_argument('--bypassChannelShift', default=False, type=bool, help='do not run channel shift function')
     
     return parser.parse_args()
     
@@ -125,12 +129,11 @@ def get_train_samples(train_loader, num_samples):
     return torch.cat(train_data, dim=0)[:num_samples]
 
 @torch.no_grad()
-def validate_model(val_loader, model, device=None, print_freq=100, print_result=False):
+def validate_model(val_loader, model, device=None, print_freq=100, print_result=False, simple=False):
     if device is None:
         device = next(model.parameters()).device
     else:
         model.to(device)
-        
     correct = 0
     total = 0
     batch_time = AverageMeter('Time', ':6.3f')
@@ -143,6 +146,7 @@ def validate_model(val_loader, model, device=None, print_freq=100, print_result=
 
     # switch to evaluate mode
     model.eval()
+    
 
     end = time.time()
     for i, (images, target) in enumerate(val_loader):
@@ -169,6 +173,10 @@ def validate_model(val_loader, model, device=None, print_freq=100, print_result=
 
         if i % print_freq == 0 and print_result:
             progress.display(i)
+            
+        if simple and i > 5:
+            break
+            
             
     acc = 100 * correct / total
 
