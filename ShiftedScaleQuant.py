@@ -51,7 +51,7 @@ def restore_ShiftedChannelQuant(model, layers, prv_name='', path='./temp/greedyL
         
 def run_ShiftRecon(model, curName, module, qnn, test_loader, act=False, **kwargs):
     iters_for_shift = kwargs['iters']
-    iters_for_round = kwargs['iters']*4
+    iters_for_round = kwargs['iters']*2
     useShiftedScale = not kwargs['bypassChannelShift']
     if kwargs['bypassChannelShift']:
         iters_for_shift = 0
@@ -140,7 +140,8 @@ def channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, subArgs, a
         
         #Soft Result
         QuantRecursiveToggle_hardTarget(qnn, [layer], '', **kwargs)
-        print(f'accuracy of qnn_soft{layer:28s}    : {validate_model(test_loader, qnn):.3f}')
+        accuracys += [validate_model(test_loader, qnn).cpu().numpy()]
+        print(f'accuracy of qnn_soft{layer:28s}    : {accuracys[-1]:.3f}')
         
         #Hard Result
         QuantRecursiveToggle_hardTarget(qnn, [layer], '', **kwargs)
@@ -233,10 +234,11 @@ if __name__ == '__main__':
     lmda = 3
     shiftTarget = [2/2, 1/2]
     # # # for itr in [1000, 4000, 8000]:
-    kwargs = dict()
-    kwargs['iters'] = itr
-    kwargs['lmda'] = (10)**(-lmda)
-    kwargs['shiftTarget'] = shiftTarget
-    qnn = channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, kwargs, args)
-    # channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, kwargs, args)
+    for lmda in range(2,5):
+        kwargs = dict()
+        kwargs['iters'] = itr
+        kwargs['lmda'] = (10)**(-lmda)
+        kwargs['shiftTarget'] = shiftTarget
+        qnn = channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, kwargs, args)
+        # channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, kwargs, args)
     
