@@ -135,3 +135,4 @@ dmypy.json
 .pyre/
 QNN_CW_W2_FP32.pth
 quant/ShiftedScaleQuant.code-workspace
+commands.sh
