@@ -24,7 +24,7 @@ class ChannelQuant(nn.Module):
         
         #optimization method
         self.opt_mode = 'none'
-        self.round_mode = 'normal'
+        # self.round_mode = 'normal'
         self.hard_targets = False
         self.hard_round = False
         
@@ -35,29 +35,30 @@ class ChannelQuant(nn.Module):
         self.deltaQuant = None
         self.shiftedDone = False
         
-        self.init_v(x=weight_tensor.clone().detach())
+        #For Shifted Scale -> Moved to layer reconstruction
+        # self.init_v(x=weight_tensor.clone().detach())
+        #For AdaRound
         self.init_beta(x=weight_tensor.clone().detach())
         
     def forward(self, x):
         #If AdaRound mode (ingore shifted scale)
-        if self.round_mode == 'adaround':
-            x_floor = torch.floor(x/self.delta)
+        if self.opt_mode == 'adaround':
+            x_floor = torch.floor(x/(self.delta*self.shiftedScale))
             if not self.hard_round:
                 x_int = x_floor + self.get_soft_round()
             else:
                 x_int = x_floor + (self.beta >= 0).float()
             x_quant = torch.clamp(x_int + self.zero_point, 0, self.n_levels - 1)
-            x_float_q = (x_quant - self.zero_point) * self.delta
+            x_float_q = (x_quant - self.zero_point) * (self.delta*self.shiftedScale)
 
             return x_float_q 
-        
-        if self.opt_mode == 'none':
+        elif self.opt_mode == 'none':
             x_int = torch.round(x / (self.delta*self.shiftedScale))
         elif self.opt_mode in  'learned_hard_sigmoid':
             p = self.get_sig_soft_targets()
             if p.dim() == 2:
                 p = p.unsqueeze(0)
-            if self.hard_targets:
+            if self.hard_targets:#hard target
                 max_index = torch.argmax(p, dim=-1)
                 x_out = self.x_q[0]
                 for i in range(1, len(self.shiftTarget)):
@@ -133,7 +134,7 @@ class ChannelQuant(nn.Module):
     def init_v(self, x: torch.Tensor):
         #W_Q = W_QS x P(W_QS) + W_QS/2 x P(W_QS/2)
         shiftTarget = self.shiftTarget
-        self.opt_mode = 'none'
+        # self.opt_mode = 'none'
         for st in shiftTarget:
             self.shiftedScale = st
             self.x_q.append(self(x))
@@ -160,7 +161,8 @@ class ChannelQuant(nn.Module):
         self.delta = self.get_delta()
         
     def init_beta(self, x: torch.Tensor):
-        delta = self.get_delta()
+        # delta = self.get_delta()
+        delta = self.delta
         x_floor = torch.floor(x / delta)
         # print('Init beta to be FP32')
         rest = (x / delta) - x_floor  # rest of rounding [0, 1)

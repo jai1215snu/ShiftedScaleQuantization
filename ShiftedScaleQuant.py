@@ -56,16 +56,21 @@ def run_ShiftRecon(model, curName, module, qnn, test_loader, act=False, **kwargs
     if kwargs['bypassChannelShift']:
         iters_for_shift = 0
     
-    if isinstance(module, QuantModule):
-        layer_recon_shiftedScale(module, iters_for_shift, kwargs['lmda'], qnn, test_loader, act)
-        if not act:
-            layer_recon_shiftedScale(module, iters_for_round, 0.01, qnn, test_loader, act, adaround=True, useShiftedScale=useShiftedScale)
-    elif isinstance(module, QuantBasicBlock):
-        block_recon_shiftedScale(module, iters_for_shift, kwargs['lmda'], qnn, test_loader, act)
-        if not act:
-            block_recon_shiftedScale(module, iters_for_round, 0.01, qnn, test_loader, act, adaround=True, useShiftedScale=useShiftedScale)
+    if not act:#Weight Quantization
+        if isinstance(module, QuantModule):
+            #Rounding
+            layer_recon_shiftedScale(module, iters_for_round, 0.01, qnn, test_loader, act, adaround=True)
+            #Channel Shifting
+            # layer_recon_shiftedScale(module, iters_for_shift, kwargs['lmda'], qnn, test_loader, act=False)
+        elif isinstance(module, QuantBasicBlock):
+            #Rounding
+            block_recon_shiftedScale(module, iters_for_round, 0.01, qnn, test_loader, act, adaround=True)
+            #Channel Shifting
+            # block_recon_shiftedScale(module, iters_for_shift, kwargs['lmda'], qnn, test_loader, act=False)
+        else:
+            raise ValueError('Not supported reconstruction module type: {}'.format(type(module)))
     else:
-        raise ValueError('Not supported reconstruction module type: {}'.format(type(module)))
+        raise NotImplementedError('')
                 
 def toggle_hardTarget(model, curName, layer, **kwargs):
     layer.weight_quantizer.hard_targets = not layer.weight_quantizer.hard_targets
@@ -131,7 +136,7 @@ def channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, subArgs, a
         
         #Run Quantization optimization(Main Function)
         set_quant_state_block(qnn, [layer], '', True)
-        QuantRecursiveShiftRecon(qnn, [layer], qnn, test_loader, '', **kwargs)
+        QuantRecursiveShiftRecon(qnn, [layer], qnn, test_loader, '', **kwargs)#--> Main Function
         qnn.clear_cached_features()
         
         ####---- Test Area ---- Begin ####
@@ -234,11 +239,11 @@ if __name__ == '__main__':
     lmda = 3
     shiftTarget = [2/2, 1/2]
     # # # for itr in [1000, 4000, 8000]:
-    for lmda in range(2,5):
-        kwargs = dict()
-        kwargs['iters'] = itr
-        kwargs['lmda'] = (10)**(-lmda)
-        kwargs['shiftTarget'] = shiftTarget
-        qnn = channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, kwargs, args)
+    # for lmda in range(2,5):
+    kwargs = dict()
+    kwargs['iters'] = itr
+    kwargs['lmda'] = (10)**(-lmda)
+    kwargs['shiftTarget'] = shiftTarget
+    qnn = channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, kwargs, args)
         # channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, kwargs, args)
     

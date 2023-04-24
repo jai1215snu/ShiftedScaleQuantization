@@ -13,12 +13,10 @@ from tqdm import tqdm, trange
 
 def block_recon_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: float = 1., model=None, test_loader=None, act=False, adaround=False, useShiftedScale=True):
     block.train()
-    warmup = 0.5
+    warmup = 0.2
     p = 2.0
     b_range = (20, 2)
-    # device = torch.device('cuda')
     device = next(model.parameters()).device
-    # lr = 0.0001
     lr = 4e-4
     
     opt_params = []
@@ -42,12 +40,13 @@ def block_recon_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: fl
                 # if not module.weight_quantizer.shiftedDone:
                 if adaround:
                     opt_params += [module.weight_quantizer.beta]
-                    module.weight_quantizer.round_mode = 'adaround'
-                    if useShiftedScale:
-                        module.weight_quantizer.update_delta()
+                    module.weight_quantizer.opt_mode = 'adaround'
+                    # module.weight_quantizer.update_delta()
                 else:
+                    weight_tensor=module.org_weight.data
+                    module.weight_quantizer.init_v(x=weight_tensor.clone().detach())
                     opt_params += [module.weight_quantizer.alpha]
-                    module.weight_quantizer.opt_mode = 'learned_hard_sigmoid'
+                    # module.weight_quantizer.opt_mode = 'learned_hard_sigmoid'
         optimizer = torch.optim.Adam(opt_params)
         scheduler = None
         # scheduler = lr_scheduler.StepLR(optimizer, step_size=iters*, gamma=0.3)
@@ -72,10 +71,8 @@ def block_recon_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: fl
     
     start_loss = 0.0
     t = tqdm(range(total_idx), desc=f'', dynamic_ncols=True)
-    
     for i in t:
         permIdx = torch.randperm(cached_inp.size(0))
-        
         for k in range(sub_iter):
             idx = permIdx[batch_size*k:batch_size*(k+1)]
             cur_inp = cached_inp[idx].to(device)
@@ -143,8 +140,7 @@ def block_recon_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: fl
 
 def layer_recon_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: float = 1., model=None, test_loader=None, act=False, adaround=False, useShiftedScale=True):
     model.train()
-    
-    warmup = 0.5
+    warmup = 0.2
     p = 2.0
     b_range = (20, 2)
     
@@ -152,16 +148,18 @@ def layer_recon_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: float
     #Torch Parallel
     if adaround:
         opt_params = [layer.weight_quantizer.beta]
-        layer.weight_quantizer.round_mode = 'adaround'
-        if useShiftedScale:
-            layer.weight_quantizer.update_delta()
+        layer.weight_quantizer.opt_mode = 'adaround'
+        # layer.weight_quantizer.update_delta()
     else:
+        weight_tensor=layer.org_weight.data
+        layer.weight_quantizer.init_v(x=weight_tensor.clone().detach())
         opt_params = [layer.weight_quantizer.alpha]
-        layer.weight_quantizer.opt_mode = 'learned_hard_sigmoid'
+        # layer.weight_quantizer.opt_mode = 'learned_hard_sigmoid'
     optimizer = torch.optim.Adam(opt_params)
-    # scheduler = None
-    scheduler = lr_scheduler.StepLR(optimizer, step_size=2500, gamma=0.3)
-    loss_func = ScaleLossFunction(layer, round_loss='relaxation', lmda=lmda,
+    scheduler = None
+    # scheduler = lr_scheduler.StepLR(optimizer, step_size=2500, gamma=0.3)
+    loss_mode = 'none' if act else 'relaxation'
+    loss_func = ScaleLossFunction(layer, round_loss=loss_mode, lmda=lmda,
                             max_count=iters, b_range=b_range,
                             decay_start=0, warmup=warmup, p=p, adaround=adaround)
     
@@ -171,7 +169,11 @@ def layer_recon_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: float
     
     target = []
     sub_iter = cached_inp.size(0)//batch_size
-    for i in range(iters//sub_iter):
+    total_idx = iters//sub_iter
+    
+    start_loss = 0.0
+    t = tqdm(range(total_idx), desc=f'', dynamic_ncols=True)
+    for i in t:
         permIdx = torch.randperm(cached_inp.size(0))
         for k in range(sub_iter):
             idx = permIdx[batch_size*k:batch_size*(k+1)]
@@ -187,28 +189,33 @@ def layer_recon_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: float
             optimizer.step()
             if scheduler is not None:
                 scheduler.step()
+                
+            run_idx = (i*sub_iter)+k
+            if run_idx%500 == 0:
+                start_loss = max(start_loss, loss_func.rec_loss)
+                t.set_description(f"{start_loss:.6f} -> {loss_func.rec_loss:.6f} {loss_func.round_loss_val:.3f} ")
             # print(i, layer.weight_quantizer.get_soft_targets()[0])
         # if i%50 == 0:
         #     target.append(layer.weight_quantizer.get_sig_soft_targets().detach().cpu().numpy())
-        if i%500 == 0:
-            model.store_quantization_state()
-            model.set_quant_state(True, False)# For Accuracy test
-            soft_acc = common.validate_model(test_loader, model, simple=True)
-            hard_acc = soft_acc
+        # if i%500 == 0:
+        #     model.store_quantization_state()
+        #     model.set_quant_state(True, False)# For Accuracy test
+        #     soft_acc = common.validate_model(test_loader, model, simple=True)
+        #     hard_acc = soft_acc
             
-            # if adaround:
-            #     layer.weight_quantizer.hard_round = True
-            # else:
-            #     layer.weight_quantizer.hard_targets = True
-            # hard_acc = common.validate_model(test_loader, model, simple=True)
-            # if adaround:
-            #     layer.weight_quantizer.hard_round = False
-            # else:
-            #     layer.weight_quantizer.hard_targets = True
+        #     # if adaround:
+        #     #     layer.weight_quantizer.hard_round = True
+        #     # else:
+        #     #     layer.weight_quantizer.hard_targets = True
+        #     # hard_acc = common.validate_model(test_loader, model, simple=True)
+        #     # if adaround:
+        #     #     layer.weight_quantizer.hard_round = False
+        #     # else:
+        #     #     layer.weight_quantizer.hard_targets = True
         
-            result_message = f'accuracy [{i:5d}/{iters//sub_iter:5d}] : {soft_acc:.3f} / {hard_acc:.3f} {loss_func.report()}'
-            print(result_message)
-            model.restore_quantization_state()
+        #     result_message = f'accuracy [{i:5d}/{iters//sub_iter:5d}] : {soft_acc:.3f} / {hard_acc:.3f} {loss_func.report()}'
+        #     print(result_message)
+        #     model.restore_quantization_state()
         
         
     if adaround:

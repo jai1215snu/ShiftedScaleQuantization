@@ -10,7 +10,7 @@ def loadArgments():
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     
     # general parameters for data and model
-    parser.add_argument('--seed', default=2023, type=int, help='random seed for results reproduction')
+    parser.add_argument('--seed', default=1005, type=int, help='random seed for results reproduction')
     parser.add_argument('--arch', default='resnet18', type=str, help='dataset name',
                         choices=['resnet18', 'resnet50', 'mobilenetv2', 'regnetx_600m', 'regnetx_3200m', 'mnasnet'])
     parser.add_argument('--batch_size', default=64, type=int, help='mini-batch size for data loader')
@@ -19,7 +19,7 @@ def loadArgments():
     parser.add_argument('--data_path', default='~/dataset/imagenet', type=str, help='path to Cifar10 data', required=False)
 
     # quantization parameters
-    parser.add_argument('--n_bits_w', default=4, type=int, help='bitwidth for weight quantization')
+    parser.add_argument('--n_bits_w', default=2, type=int, help='bitwidth for weight quantization')
     parser.add_argument('--channel_wise', default=True, type=bool, help='apply channel_wise quantization for weights')
     parser.add_argument('--n_bits_a', default=4, type=int, help='bitwidth for activation quantization')
     parser.add_argument('--act_quant', default=True, help='apply activation quantization', type=bool)
