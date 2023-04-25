@@ -7,6 +7,7 @@ from quant.quant_block import BaseQuantBlock, QuantBasicBlock
 import pickle
 from myScaledMethods import *
 from quant.layer_recon_shiftedScale import *
+from quant.layer_recon_fused_shiftedScale import *
 
 #multi gpus
 # import linklink as link
@@ -14,7 +15,7 @@ from quant.layer_recon_shiftedScale import *
 # import torch.distributed as dist
 # import torch.multiprocessing as mp
 
-def QuantRecursiveShiftRecon(model: nn.Module, layerEnabled, qnn, test_loader, prv_name="", act=False, **kwargs):
+def QuantRecursiveShiftRecon(model: nn.Module, layerEnabled, qnn, test_loader, prv_name="", ret=dict(), act=False, **kwargs):
     for name, module in model.named_children():
         curName = prv_name+'.'+name
         # print(curName)
@@ -22,16 +23,16 @@ def QuantRecursiveShiftRecon(model: nn.Module, layerEnabled, qnn, test_loader, p
             if module.ignore_reconstruction is True:
                 continue
             if curName in layerEnabled:
-                run_ShiftRecon(model, curName, module, qnn, test_loader, act, **kwargs)
+                ret[curName] = run_ShiftReconFused(model, curName, module, qnn, test_loader, act, **kwargs)
         elif isinstance(module, BaseQuantBlock):
             if module.ignore_reconstruction is True:
                 continue
             if curName in layerEnabled:
-                run_ShiftRecon(model, curName, module, qnn, test_loader, act, **kwargs)
+                ret[curName] = run_ShiftReconFused(model, curName, module, qnn, test_loader, act, **kwargs)
             else:
-                QuantRecursiveShiftRecon(module, layerEnabled, qnn, test_loader, curName, act, **kwargs)
+                QuantRecursiveShiftRecon(module, layerEnabled, qnn, test_loader, curName, ret, act, **kwargs)
         else:
-            QuantRecursiveShiftRecon(module, layerEnabled, qnn, test_loader, curName, act, **kwargs)
+            QuantRecursiveShiftRecon(module, layerEnabled, qnn, test_loader, curName, ret, act, **kwargs)
 
 def restore_ShiftedChannelQuant(model, layers, prv_name='', path='./temp/greedyLoss'):
     for name, module in model.named_children():
@@ -48,29 +49,85 @@ def restore_ShiftedChannelQuant(model, layers, prv_name='', path='./temp/greedyL
                         print(f'Restored {name} shiftedScale')
         else:
             restore_ShiftedChannelQuant(module, layers, curName, path)
+
+#Channel First
+def run_ShiftReconFused(model, curName, module, qnn, test_loader, act=False, **kwargs):
+    iters_for_shift = kwargs['iters']
+    iters_for_round = kwargs['iters']*2
+    useShiftedScale = not kwargs['bypassChannelShift']
+    if kwargs['bypassChannelShift']:
+        iters_for_shift = 0
         
+    rec_loss = []
+    
+    if not act:#Weight Quantization
+        if isinstance(module, QuantModule):
+            #Channel Shifting
+            rec_loss_s = layer_recon_fused_shiftedScale(module, iters_for_shift, (0.001, kwargs['lmda']), qnn, test_loader, act=False)
+        elif isinstance(module, QuantBasicBlock):
+            #Channel Shifting
+            rec_loss_s = block_recon_fused_shiftedScale(module, iters_for_shift, (0.001, kwargs['lmda']), qnn, test_loader, act=False)
+        else:
+            raise ValueError('Not supported reconstruction module type: {}'.format(type(module)))
+    else:
+        raise NotImplementedError('')
+    rec_loss += [rec_loss_s]
+    return rec_loss
+
+#Channel First
 def run_ShiftRecon(model, curName, module, qnn, test_loader, act=False, **kwargs):
     iters_for_shift = kwargs['iters']
     iters_for_round = kwargs['iters']*2
     useShiftedScale = not kwargs['bypassChannelShift']
     if kwargs['bypassChannelShift']:
         iters_for_shift = 0
+        
+    rec_loss = []
     
     if not act:#Weight Quantization
         if isinstance(module, QuantModule):
-            #Rounding
-            layer_recon_shiftedScale(module, iters_for_round, 0.01, qnn, test_loader, act, adaround=True)
             #Channel Shifting
-            # layer_recon_shiftedScale(module, iters_for_shift, kwargs['lmda'], qnn, test_loader, act=False)
+            rec_loss_s = layer_recon_shiftedScale(module, iters_for_shift, kwargs['lmda'], qnn, test_loader, act=False)
+            #Rounding
+            rec_loss_r = layer_recon_shiftedScale(module, iters_for_round, 0.01, qnn, test_loader, act, adaround=True)
         elif isinstance(module, QuantBasicBlock):
-            #Rounding
-            block_recon_shiftedScale(module, iters_for_round, 0.01, qnn, test_loader, act, adaround=True)
             #Channel Shifting
-            # block_recon_shiftedScale(module, iters_for_shift, kwargs['lmda'], qnn, test_loader, act=False)
+            rec_loss_s = block_recon_shiftedScale(module, iters_for_shift, kwargs['lmda'], qnn, test_loader, act=False)
+            #Rounding
+            rec_loss_r = block_recon_shiftedScale(module, iters_for_round, 0.01, qnn, test_loader, act, adaround=True)
         else:
             raise ValueError('Not supported reconstruction module type: {}'.format(type(module)))
     else:
         raise NotImplementedError('')
+    rec_loss += [rec_loss_s, rec_loss_r]
+    return rec_loss
+
+def run_ShiftRecon_round_first(model, curName, module, qnn, test_loader, act=False, **kwargs):
+    iters_for_shift = kwargs['iters']
+    iters_for_round = kwargs['iters']*2
+    useShiftedScale = not kwargs['bypassChannelShift']
+    if kwargs['bypassChannelShift']:
+        iters_for_shift = 0
+        
+    rec_loss = []
+    
+    if not act:#Weight Quantization
+        if isinstance(module, QuantModule):
+            #Rounding
+            rec_loss_r = layer_recon_shiftedScale(module, iters_for_round, 0.01, qnn, test_loader, act, adaround=True)
+            #Channel Shifting
+            rec_loss_s = layer_recon_shiftedScale(module, iters_for_shift, kwargs['lmda'], qnn, test_loader, act=False)
+        elif isinstance(module, QuantBasicBlock):
+            #Rounding
+            rec_loss_r = block_recon_shiftedScale(module, iters_for_round, 0.01, qnn, test_loader, act, adaround=True)
+            #Channel Shifting
+            rec_loss_s = block_recon_shiftedScale(module, iters_for_shift, kwargs['lmda'], qnn, test_loader, act=False)
+        else:
+            raise ValueError('Not supported reconstruction module type: {}'.format(type(module)))
+    else:
+        raise NotImplementedError('')
+    rec_loss += [rec_loss_r, rec_loss_s]
+    return rec_loss
                 
 def toggle_hardTarget(model, curName, layer, **kwargs):
     layer.weight_quantizer.hard_targets = not layer.weight_quantizer.hard_targets
@@ -117,6 +174,7 @@ def channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, subArgs, a
     qnn.set_quant_state(False, False)# Default Setting
     
     accuracys = []
+    loss_dic = dict()
     for layer in layerEnabled:
         print("Reconstructing Layer: ", layer)
         #Before Quant
@@ -136,30 +194,34 @@ def channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, subArgs, a
         
         #Run Quantization optimization(Main Function)
         set_quant_state_block(qnn, [layer], '', True)
-        QuantRecursiveShiftRecon(qnn, [layer], qnn, test_loader, '', **kwargs)#--> Main Function
+        QuantRecursiveShiftRecon(qnn, [layer], qnn, test_loader, '', loss_dic, **kwargs)#--> Main Function
         qnn.clear_cached_features()
         
         ####---- Test Area ---- Begin ####
         qnn.store_quantization_state()
         qnn.set_quant_state(True, False)# For Accuracy test, All Quantized mode
         
-        #Soft Result
-        QuantRecursiveToggle_hardTarget(qnn, [layer], '', **kwargs)
-        accuracys += [validate_model(test_loader, qnn).cpu().numpy()]
-        print(f'accuracy of qnn_soft{layer:28s}    : {accuracys[-1]:.3f}')
+        # #Soft Result
+        # QuantRecursiveToggle_hardTarget(qnn, [layer], '', **kwargs)
+        # accuracys += [validate_model(test_loader, qnn, print_result=True).cpu().numpy()]
+        # print(f'accuracy of qnn_soft{layer:28s}    : {accuracys[-1]:.3f}')
         
-        #Hard Result
-        QuantRecursiveToggle_hardTarget(qnn, [layer], '', **kwargs)
-        # accuracys += [validate_model(test_loader, qnn).cpu().numpy()]
-        # print(f'accuracy of qnn_hard{layer:28s}    : {validate_model(test_loader, qnn):.3f}')
+        # #Hard Result
+        # QuantRecursiveToggle_hardTarget(qnn, [layer], '', **kwargs)
+        if layer in ['.model.layer4.0','.model.layer4.1','.model.fc']:
+            accuracys += [validate_model(test_loader, qnn, print_result=True).cpu().numpy()]
+            print(f'accuracy of qnn_hard{layer:28s}    : {accuracys[-1]:.3f}')
         
         qnn.restore_quantization_state()
         ####---- Test Area ---- End   ####
-        
+    
+    print(loss_dic)
+    shiftTarget = subArgs['shiftTarget']
+    
     if bot is not None:
         bot.sendMessage(chat_id=botInfo['id'], text=str(np.array(accuracys)))
-    with open(f'./temp/accuracy_{k_lmda:.3e}_itr{k_iters}.pkl', 'wb') as f:
-        pickle.dump(np.array(accuracys), f)
+    with open(f'./temp/loss_{k_lmda:.3e}_itr{k_iters}_{str(shiftTarget)}.pkl', 'wb') as f:
+        pickle.dump(loss_dic, f)
     return qnn
 
 def channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, subArgs, args):
@@ -235,15 +297,16 @@ if __name__ == '__main__':
     botInfo = {'token':'5820626937:AAHHsvT__T7xkCiLujwi799CyMoWtwNkbTM', 'id':'5955354823'} if args.msg_bot_enable else None
 
     # #Add these to common parameters
-    itr = 10000
-    lmda = 3
-    shiftTarget = [2/2, 1/2]
+    itr = 30000
+    lmda = 1
+    shiftTargets = [[2/2, 1/2], [2/2, 3/2, 5/2], [4/4, 5/4, 3/4]]
     # # # for itr in [1000, 4000, 8000]:
-    # for lmda in range(2,5):
-    kwargs = dict()
-    kwargs['iters'] = itr
-    kwargs['lmda'] = (10)**(-lmda)
-    kwargs['shiftTarget'] = shiftTarget
-    qnn = channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, kwargs, args)
-        # channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, kwargs, args)
+    for shiftTarget in shiftTargets:
+        for lmda in range(1,5):
+            kwargs = dict()
+            kwargs['iters'] = itr if len(shiftTarget) == 2 else itr*2
+            kwargs['lmda'] = (10)**(-lmda)
+            kwargs['shiftTarget'] = shiftTarget
+            qnn = channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, kwargs, args)
+                # channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, kwargs, args)
     

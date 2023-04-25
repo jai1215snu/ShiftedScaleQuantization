@@ -7,7 +7,6 @@ from models.resnet import BasicBlock, Bottleneck
 from models.regnet import ResBottleneckBlock
 from models.mobilenetv2 import InvertedResidual
 import sys
-#TODO: CIFAR10 models
 sys.path.append('..')
 from pretrained.PyTorch_CIFAR10.cifar10_models.resnet import BasicBlockCIFAR
 
@@ -95,7 +94,7 @@ class QuantBasicBlock(BaseQuantBlock):
         # copying all attributes in original block
         self.stride = basic_block.stride
         
-        # self.dump_cnt = 0
+        self.dump_cnt = 0
 
     def forward(self, x):
         if self.cache_features == 'if':
