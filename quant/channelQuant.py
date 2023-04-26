@@ -5,9 +5,11 @@ import torch.nn.functional as F
 
 class ChannelQuant(nn.Module):
     @torch.no_grad()
-    def __init__(self, delta, uaq: UniformAffineQuantizer, weight_tensor: torch.Tensor, shiftTarget: list=[2/2, 2/2]):
+    def __init__(self, delta, uaq: UniformAffineQuantizer, weight_tensor: torch.Tensor, shiftTarget: list=[2/2, 2/2], act=False, name='--'):
         super(ChannelQuant, self).__init__()
         # copying all attributes from UniformAffineQuantizer
+        self.act = act
+        
         self.n_bits = uaq.n_bits
         self.sym = uaq.sym
         self.delta = uaq.delta * delta
@@ -34,6 +36,8 @@ class ChannelQuant(nn.Module):
         self.beta = None #For adaptive rounding
         self.deltaQuant = None
         self.shiftedDone = False
+        
+        self.name = name
         
         #For Shifted Scale -> Moved to layer reconstruction
         # self.init_v(x=weight_tensor.clone().detach())
@@ -107,7 +111,8 @@ class ChannelQuant(nn.Module):
         return torch.clamp(torch.sigmoid(self.beta) * (self.zeta - self.gamma) + self.gamma, 0, 1)
     
     def init_alpha_ori(self, x: torch.Tensor, clip = 0.80, device='cuda'):
-        RUN_CHANNEL_WISE = True #NOTE: temp code Full granuarity
+        # RUN_CHANNEL_WISE = True #NOTE: temp code Full granuarity
+        RUN_CHANNEL_WISE = False #NOTE: use all
         shiftNum = len(self.shiftTarget)
         mse = []
         
@@ -136,8 +141,9 @@ class ChannelQuant(nn.Module):
     
     def init_alpha(self, x: torch.Tensor, clip = 0.80, device='cuda'):
         RUN_CHANNEL_WISE = True #NOTE: temp code Full granuarity
+        # RUN_CHANNEL_WISE = False #NOTE: temp code Full granuarity
         # #TODO: Temp code min_index is always point to 1.0
-        clip = 0.5
+        clip = 0.8
         shiftNum = len(self.shiftTarget)
         mse = []
         
@@ -151,9 +157,13 @@ class ChannelQuant(nn.Module):
         _, min_index = torch.min(mse, dim=0)
         
         # #TODO: Temp code min_index is always point to 1.0
-        min_index = torch.zeros_like(min_index)
+        # min_index = torch.zeros_like(min_index)
         
-        remain_probability = (1.0-clip)/(shiftNum-1)
+        if shiftNum == 1:
+            remain_probability = 0
+            clip = 1.0
+        else:
+            remain_probability = (1.0-clip)/(shiftNum-1)
         alpha = torch.full((*min_index.shape, shiftNum), remain_probability, dtype=torch.float, device=device)
         
         mask = torch.zeros((*min_index.shape, shiftNum), dtype=torch.bool)
@@ -213,6 +223,10 @@ class ChannelQuant(nn.Module):
         return delta
     
     @torch.no_grad()
+    def init_v_beta_default(self):
+        pass
+    
+    @torch.no_grad()
     def init_v_beta(self, x: torch.Tensor):
         shiftTarget = self.shiftTarget
         for st in shiftTarget:
@@ -236,7 +250,6 @@ class ChannelQuant(nn.Module):
         # delta = self.get_delta()
         delta = self.delta
         x_floor = torch.floor(x / delta)
-        # print('Init beta to be FP32')
         rest = (x / delta) - x_floor  # rest of rounding [0, 1)
         beta = -torch.log((self.zeta - self.gamma) / (rest - self.gamma) - 1)  # => sigmoid(beta) = rest
         self.beta = nn.Parameter(beta)

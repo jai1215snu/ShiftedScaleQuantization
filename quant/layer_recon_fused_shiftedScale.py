@@ -7,6 +7,7 @@ import pickle
 import torch.nn as nn
 import common
 import torch.optim.lr_scheduler as lr_scheduler
+from quant.channelQuantAct import ChannelQuantAct
 from tqdm import tqdm, trange
 
 def block_recon_fused_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: list = [1.,1.], model=None, test_loader=None, act=False, adaround=False, useShiftedScale=True):
@@ -18,6 +19,7 @@ def block_recon_fused_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lm
     lr = 4e-4
     scheduler = None
     
+    quantizers = []
     opt_params = []
     if act:
         #Init setting for all weight quantizer
@@ -25,11 +27,20 @@ def block_recon_fused_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lm
             if isinstance(module, QuantModule):
                 if module.act_quantizer.disable_act_quant:
                     continue
-                opt_params += [module.act_quantizer.delta]
+                module.act_quantizer = ChannelQuantAct(uaq=module.act_quantizer, shiftTarget=[2/2, 1/2])
+                module.act_quantizer.init_v_beta(x=None)
+                opt_params += [module.act_quantizer.alpha]
+                quantizers += [module.act_quantizer]
+                module.act_quantizer.opt_mode = 'shiftFeature'
+                
             elif isinstance(module, UniformAffineQuantizer):
                 if module.disable_act_quant:
                     continue
-                opt_params += [module.delta]
+                module = ChannelQuantAct(uaq=module.act_quantizer, shiftTarget=[2/2, 1/2])
+                module.init_v_beta_default(x=None)
+                opt_params += [module.alpha]
+                quantizers += [module]
+                module.opt_mode = 'shiftFeature'
         optimizer = torch.optim.Adam(opt_params, lr=lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=iters, eta_min=0.)
     else:
@@ -40,6 +51,7 @@ def block_recon_fused_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lm
                 module.weight_quantizer.init_v_beta(x=weight_tensor.clone().detach())
                 opt_params += [module.weight_quantizer.beta]
                 opt_params += [module.weight_quantizer.alpha]
+                quantizers += [module.weight_quantizer]
                 module.weight_quantizer.opt_mode = 'adaShift'
         optimizer = torch.optim.Adam(opt_params)
     opt_param_num = sum([p.numel() for p in opt_params])
@@ -47,7 +59,7 @@ def block_recon_fused_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lm
     loss_mode = 'none' if act else 'relaxation'
     
     # lmda = lmda * opt_param_num
-    loss_func = FusedScaleLossBlockFunction(block, round_loss=loss_mode, lmda=lmda,
+    loss_func = FusedScaleLossFunction(block, quantizers, round_loss=loss_mode, lmda=lmda,
                             max_count=iters, b_range=b_range,
                             decay_start=0, warmup=warmup, p=p)
     
@@ -59,6 +71,8 @@ def block_recon_fused_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lm
     start_loss = 0.0
     t = tqdm(range(total_idx), desc=f'', dynamic_ncols=True)
     
+    probs = []
+        
     for i in t:
         permIdx = torch.randperm(cached_inp.size(0))[:batch_size]
         cur_inp = cached_inp[permIdx].to(device)
@@ -77,7 +91,11 @@ def block_recon_fused_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lm
             start_loss = max(start_loss, loss_func.rec_loss)
             # print(f"{start_loss:.6f} -> {loss_func.rec_loss:.6f} {loss_func.round_loss_val:.3f}")
             t.set_description(f"{start_loss:.6f} -> {loss_func.rec_loss:.6f} {loss_func.round_loss_val} ")
-
+            probs.append(quantizers[0].get_sig_soft_targets().detach().cpu().numpy())
+    
+    # with open("./temp/probs.npy", "wb") as f:
+    #     np.save(f, np.array(probs))
+    
     rec_loss_out = []
     cur_inp = cached_inp[:batch_size].to(device)
     cur_out = cached_out[:batch_size].to(device)
@@ -104,7 +122,6 @@ def block_recon_fused_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lm
     return rec_loss_out
 
 
-
 def layer_recon_fused_shiftedScale(layer: QuantModule, iters: int = 20000, lmda: list = [1.,1.], model=None, test_loader=None, act=False, adaround=False, useShiftedScale=True):
     model.train()
     warmup = 0.2
@@ -122,13 +139,15 @@ def layer_recon_fused_shiftedScale(layer: QuantModule, iters: int = 20000, lmda:
     scheduler = None
     # scheduler = lr_scheduler.StepLR(optimizer, step_size=2500, gamma=0.3)
     loss_mode = 'none' if act else 'relaxation'
-    loss_func = FusedScaleLossFunction(layer, round_loss=loss_mode, lmda=lmda,
+    loss_func = FusedScaleLossFunction(layer, [layer.weight_quantizer], round_loss=loss_mode, lmda=lmda,
                             max_count=iters, b_range=b_range,
                             decay_start=0, warmup=warmup, p=p, adaround=adaround)
     
     cached_inp = torch.cat(layer.cached_inp_features).to(device)
     cached_out = torch.cat(layer.cached_out_features).to(device)
     batch_size = 32
+    opt_param_num = sum([p.numel() for p in opt_params])
+    print("number of elements in opt_params: {}".format(opt_param_num))
     
     total_idx = iters
     start_loss = 0.0
@@ -176,9 +195,10 @@ def layer_recon_fused_shiftedScale(layer: QuantModule, iters: int = 20000, lmda:
     model.eval()
     return rec_loss_out
         
-class FusedScaleLossBlockFunction:
+class FusedScaleLossFunction:
     def __init__(self,
                  block: BaseQuantBlock,
+                 quantizer,
                  round_loss: str = 'relaxation',
                  lmda: list = [1., 1.],
                  max_count: int = 2000,
@@ -189,6 +209,7 @@ class FusedScaleLossBlockFunction:
                  adaround: bool = False):
 
         self.block = block
+        self.quantizer = quantizer
         self.round_loss = round_loss
         self.lmdaR = lmda[0]
         self.lmdaS = lmda[1]
@@ -198,6 +219,9 @@ class FusedScaleLossBlockFunction:
         self.total_loss = self.rec_loss = self.round_loss_val = self.b = 0
         
         self.temp_decay = FusedLinearTempDecayShift(max_count, rel_start_decay=warmup + (1 - warmup) * decay_start,
+                                          start_b=b_range[0], end_b=b_range[1])
+        
+        self.temp_decay_shift = FusedLinearTempDecayShift(max_count*3/4, rel_start_decay=warmup + (1 - warmup) * decay_start,
                                           start_b=b_range[0], end_b=b_range[1])
         self.count = 0
 
@@ -217,17 +241,25 @@ class FusedScaleLossBlockFunction:
         round_lossS = 0
         
         b = self.temp_decay(self.count)
+        b2 = self.temp_decay_shift(self.count)
         if self.count < self.loss_start or self.round_loss == 'none':
-            b = 0
+            b = b2 = 0
             round_lossR = 0
             round_lossS = 0
         elif self.round_loss == 'relaxation':
-            for name, module in self.block.named_modules():
-                if isinstance(module, QuantModule):
-                    round_valsR = module.weight_quantizer.get_soft_round()
-                    round_lossR += self.lmdaR * (1 - ((round_valsR - .5).abs() * 2).pow(b)).sum()
-                    round_valsS = module.weight_quantizer.get_sig_soft_targets()
-                    round_lossS += self.lmdaS * (- torch.sum(round_valsS * torch.log(round_valsS+1e-10)))
+            for qt in self.quantizer:
+                round_valsR = qt.get_soft_round()
+                round_lossR += self.lmdaR * (1 - ((round_valsR - .5).abs() * 2).pow(b)).sum()
+
+                round_valsS = qt.get_sig_soft_targets()
+                round_lossS += self.lmdaS * (1 - ((round_valsS - .5).abs() * 2).pow(b2)).sum()
+            # for name, module in self.block.named_modules():
+            #     if isinstance(module, QuantModule):
+            #         round_valsR = module.weight_quantizer.get_soft_round()
+            #         round_lossR += self.lmdaR * (1 - ((round_valsR - .5).abs() * 2).pow(b)).sum()
+            #         round_valsS = module.weight_quantizer.get_sig_soft_targets()
+            #         round_lossS += self.lmdaS * (1 - ((round_valsS - .5).abs() * 2).pow(b2)).sum()
+            #         # round_lossS += self.lmdaS * (torch.sum( (-round_valsS * torch.log(round_valsS+1e-10))))
         else:
             raise NotImplementedError
 
@@ -239,80 +271,85 @@ class FusedScaleLossBlockFunction:
         self.round_loss_val = f'R:{round_lossR:.3f} S:{round_lossS:.3f}'
         self.b = b
         self.count += 1
+        
+        # if self.count%100 == 0:
+        #     print(self.quantizer[0].get_sig_soft_targets()[0][:3])
         return total_loss
 
     def report(self):
         return 'Total loss:\t{:.6f} (rec:{:.6f}, round:{})\tb={:.2f}'.format(
                 float(self.total_loss), float(self.rec_loss), self.round_loss_val, self.b)
         
-class FusedScaleLossFunction:
-    def __init__(self,
-                 layer: QuantModule,
-                 round_loss: str = 'relaxation',
-                 lmda: list = [1., 1.],
-                 max_count: int = 2000,
-                 b_range: tuple = (10, 2),
-                 decay_start: float = 0.0,
-                 warmup: float = 0.0,
-                 p: float = 2.0,
-                 adaround: bool = False
-                 ):
+# class FusedScaleLossFunction:
+#     def __init__(self,
+#                  layer: QuantModule,
+#                  round_loss: str = 'relaxation',
+#                  lmda: list = [1., 1.],
+#                  max_count: int = 2000,
+#                  b_range: tuple = (10, 2),
+#                  decay_start: float = 0.0,
+#                  warmup: float = 0.0,
+#                  p: float = 2.0,
+#                  adaround: bool = False
+#                  ):
 
-        self.layer = layer
-        self.round_loss = round_loss
-        self.lmdaR = lmda[0]
-        self.lmdaS = lmda[1]
-        self.loss_start = max_count * warmup
-        self.itr = max_count
-        self.p = p
-        self.total_loss = self.rec_loss = self.round_loss_val = self.b = 0
+#         self.layer = layer
+#         self.round_loss = round_loss
+#         self.lmdaR = lmda[0]
+#         self.lmdaS = lmda[1]
+#         self.loss_start = max_count * warmup
+#         self.itr = max_count
+#         self.p = p
+#         self.total_loss = self.rec_loss = self.round_loss_val = self.b = 0
 
-        self.adaround = adaround
-        self.temp_decay = FusedLinearTempDecayShift(max_count, rel_start_decay=warmup + (1 - warmup) * decay_start,
-                                          start_b=b_range[0], end_b=b_range[1])
-        self.count = 0
+#         self.adaround = adaround
+#         self.temp_decay = FusedLinearTempDecayShift(max_count, rel_start_decay=warmup + (1 - warmup) * decay_start,
+#                                           start_b=b_range[0], end_b=b_range[1])
+#         self.temp_decay_shift = FusedLinearTempDecayShift(max_count*3/4, rel_start_decay=warmup + (1 - warmup) * decay_start,
+#                                     start_b=b_range[0], end_b=b_range[1])
+#         self.count = 0
 
-    def __call__(self, pred, tgt, grad=None):
-        """
-        Compute the total loss for adaptive rounding:
-        rec_loss is the quadratic output reconstruction loss, round_loss is
-        a regularization term to optimize the rounding policy
+#     def __call__(self, pred, tgt, grad=None):
+#         """
+#         Compute the total loss for adaptive rounding:
+#         rec_loss is the quadratic output reconstruction loss, round_loss is
+#         a regularization term to optimize the rounding policy
 
-        :param pred: output from quantized model
-        :param tgt: output from FP model
-        :param grad: gradients to compute fisher information
-        :return: total loss function
-        """
-        rec_loss = lp_loss(pred, tgt, p=self.p)
-        round_lossR = 0
-        round_lossS = 0
-        b = self.temp_decay(self.count)
-        if self.count < self.loss_start or self.round_loss == 'none':
-            b = 0
-            round_lossR = 0
-            round_lossS = 0
-        elif self.round_loss == 'relaxation':
-            round_lossR = 0
-            round_lossS = 0
-            round_valsR = self.layer.weight_quantizer.get_soft_round()
-            round_lossR += self.lmda * (1 - ((round_valsR - .5).abs() * 2).pow(b)).sum()
-            round_valsS = self.layer.weight_quantizer.get_sig_soft_targets()
-            round_lossS += self.lmda * (- torch.sum(round_valsS * torch.log(round_valsS+1e-10)))
-        else:
-            raise NotImplementedError
+#         :param pred: output from quantized model
+#         :param tgt: output from FP model
+#         :param grad: gradients to compute fisher information
+#         :return: total loss function
+#         """
+#         rec_loss = lp_loss(pred, tgt, p=self.p)
+#         round_lossR = 0
+#         round_lossS = 0
+#         b = self.temp_decay(self.count)
+#         b2 = self.temp_decay_shift(self.count)
+#         if self.count < self.loss_start or self.round_loss == 'none':
+#             b = b2 = 0
+#             round_lossR = 0
+#             round_lossS = 0
+#         elif self.round_loss == 'relaxation':
+#             round_valsR = self.layer.weight_quantizer.get_soft_round()
+#             round_lossR += self.lmdaR * (1 - ((round_valsR - .5).abs() * 2).pow(b)).sum()
+#             round_valsS = self.layer.weight_quantizer.get_sig_soft_targets()
+#             # round_lossS += self.lmdaS * (- torch.sum(round_valsS * torch.log(round_valsS+1e-10)))
+#             round_lossS += self.lmdaS * (1 - ((round_valsS - .5).abs() * 2).pow(b2)).sum()
+#         else:
+#             raise NotImplementedError
 
-        total_loss = rec_loss + round_lossR + round_lossS
+#         total_loss = rec_loss + round_lossR + round_lossS
 
-        self.total_loss = total_loss.item()
-        self.rec_loss = rec_loss.item()
-        self.round_loss_val = f'R:{round_lossR:.3f} S:{round_lossS:.3f}'
-        self.b = b
-        self.count += 1
-        return total_loss
+#         self.total_loss = total_loss.item()
+#         self.rec_loss = rec_loss.item()
+#         self.round_loss_val = f'R:{round_lossR:.3f} S:{round_lossS:.3f}'
+#         self.b = b
+#         self.count += 1
+#         return total_loss
     
-    def report(self):
-        return 'Total loss:\t{:.6f} (rec:{:.6f}, round:{})\tb={:.2f}'.format(
-                float(self.total_loss), float(self.rec_loss), self.round_loss_val, self.b)
+#     def report(self):
+#         return 'Total loss:\t{:.6f} (rec:{:.6f}, round:{})\tb={:.2f}'.format(
+                # float(self.total_loss), float(self.rec_loss), self.round_loss_val, self.b)
     
 class FusedLinearTempDecayShift:
     def __init__(self, t_max: int, rel_start_decay: float = 0.2, start_b: int = 10, end_b: int = 2):

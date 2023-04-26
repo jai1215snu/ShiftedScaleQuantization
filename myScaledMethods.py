@@ -13,28 +13,25 @@ import telegram
 from common import *
 
 def build_ShiftedChannelQuantLayer(model, curName, layer, delta=1.0, **kwargs):
-    shiftTarget = kwargs['shiftTarget']
-    layer.weight_quantizer = ChannelQuant(delta, uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data, shiftTarget=shiftTarget)
+    shiftTarget = kwargs['shiftTarget'] if not curName.startswith(tuple(kwargs['skipShiftLayer'])) else [2/2]
+    layer.weight_quantizer = ChannelQuant(delta, uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data, shiftTarget=shiftTarget, name=curName)
     layer.use_weight_quant = True
     layer.cache_features   = 'none'
     
 def build_ShiftedChannelQuantBlock(model, prv_name, block, delta=1.0, **kwargs):
-    shiftTarget = kwargs['shiftTarget']
-    for name, layer in model.named_children():
+    for name, layer in block.named_children():
         curName = prv_name+'.'+name
+        shiftTarget = kwargs['shiftTarget'] if not curName.startswith(tuple(kwargs['skipShiftLayer'])) else [2/2]
         # print("block const name: ", curName, type(layer))
         if isinstance(layer, QuantModule):
             if isinstance(layer.weight_quantizer, UniformAffineQuantizer):
-                layer.weight_quantizer = ChannelQuant(delta, uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data, shiftTarget=shiftTarget)
+                layer.weight_quantizer = ChannelQuant(delta, uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data, shiftTarget=shiftTarget, name=curName)
                 layer.use_weight_quant = True
                 layer.cache_features   = 'none'
-        else:
-            build_ShiftedChannelQuantBlock(layer, curName, block, **kwargs)
     
 def build_ShiftedChannelQuant(model: nn.Module, layerEnabled, prv_name="", delta=1.0, **kwargs):
     for name, module in model.named_children():
         curName = prv_name+'.'+name
-        # print("Building shifted channel quant for: ", curName, type(module))
         if isinstance(module, QuantModule):
             if module.ignore_reconstruction is True:
                 continue
@@ -46,9 +43,9 @@ def build_ShiftedChannelQuant(model: nn.Module, layerEnabled, prv_name="", delta
             if curName in layerEnabled:
                 build_ShiftedChannelQuantBlock(model, curName, module, delta, **kwargs)
             else:
-                build_ShiftedChannelQuant(module, layerEnabled, curName, **kwargs)
+                build_ShiftedChannelQuant(module, layerEnabled, curName, delta, **kwargs)
         else:
-            build_ShiftedChannelQuant(module, layerEnabled, curName, **kwargs)
+            build_ShiftedChannelQuant(module, layerEnabled, curName, delta, **kwargs)
 
 # def store_quant_state(model):
 #     qState = []
