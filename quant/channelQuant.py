@@ -7,6 +7,8 @@ class ChannelQuant(nn.Module):
     @torch.no_grad()
     def __init__(self, delta, uaq: UniformAffineQuantizer, weight_tensor: torch.Tensor, shiftTarget: list=[2/2, 2/2], act=False, name='--'):
         super(ChannelQuant, self).__init__()
+        self.RUN_CHANNEL_WISE = True #NOTE: small size
+        # self.RUN_CHANNEL_WISE = False #NOTE: big size(use tensor wise)
         # copying all attributes from UniformAffineQuantizer
         self.act = act
         
@@ -52,7 +54,12 @@ class ChannelQuant(nn.Module):
                 x_int = x_floor + self.get_soft_round()
             else:
                 x_int = x_floor + (self.beta >= 0).float()
-            x_quant = torch.clamp(x_int + self.zero_point, 0, self.n_levels - 1)
+            
+            if self.sym:
+                x_quant = torch.clamp(x_int + self.zero_point, -self.n_levels//2, self.n_levels//2 - 1)
+            else:
+                x_quant = torch.clamp(x_int + self.zero_point, 0, self.n_levels - 1)
+                
             x_float_q = (x_quant - self.zero_point) * (self.delta*self.shiftedScale)
             return x_float_q 
         elif self.opt_mode == 'adaround':
@@ -61,7 +68,12 @@ class ChannelQuant(nn.Module):
                 x_int = x_floor + self.get_soft_round()
             else:
                 x_int = x_floor + (self.beta >= 0).float()
-            x_quant = torch.clamp(x_int + self.zero_point, 0, self.n_levels - 1)
+                
+            if self.sym:
+                x_quant = torch.clamp(x_int + self.zero_point, -self.n_levels//2, self.n_levels//2 - 1)
+            else:
+                x_quant = torch.clamp(x_int + self.zero_point, 0, self.n_levels - 1)
+                
             x_float_q = (x_quant - self.zero_point) * (self.delta*self.shiftedScale)
             return x_float_q 
         elif self.opt_mode == 'none':
@@ -71,7 +83,11 @@ class ChannelQuant(nn.Module):
         else:
             raise ValueError('opt_mode is not defined')
             
-        x_quant = torch.clamp(x_int + self.zero_point, 0, self.n_levels - 1)
+        if self.sym:
+            x_quant = torch.clamp(x_int + self.zero_point, -self.n_levels//2, self.n_levels//2 - 1)
+        else:
+            x_quant = torch.clamp(x_int + self.zero_point, 0, self.n_levels - 1)
+            
         x_quant = x_quant - self.zero_point
         
         x_float_q = x_quant * (self.delta*self.shiftedScale)
@@ -110,40 +126,38 @@ class ChannelQuant(nn.Module):
     def get_soft_round(self):
         return torch.clamp(torch.sigmoid(self.beta) * (self.zeta - self.gamma) + self.gamma, 0, 1)
     
-    def init_alpha_ori(self, x: torch.Tensor, clip = 0.80, device='cuda'):
-        # RUN_CHANNEL_WISE = True #NOTE: temp code Full granuarity
-        RUN_CHANNEL_WISE = False #NOTE: use all
-        shiftNum = len(self.shiftTarget)
-        mse = []
+    # def init_alpha_ori(self, x: torch.Tensor, clip = 0.80, device='cuda'):
+    #     # RUN_CHANNEL_WISE = True #NOTE: temp code Full granuarity
+    #     RUN_CHANNEL_WISE = False #NOTE: use all
+    #     shiftNum = len(self.shiftTarget)
+    #     mse = []
         
-        for i in range(shiftNum):
-            if self.isFC:
-                mse.append((x - self.x_q[i])**2)
-            else:
-                concat_ch = (0, 2, 3) if RUN_CHANNEL_WISE else (2, 3)
-                mse.append(torch.sum((x - self.x_q[i])**2, dim=concat_ch))
-        mse = torch.stack(mse, dim=0)
-        _, min_index = torch.min(mse, dim=0)
+    #     for i in range(shiftNum):
+    #         if self.isFC:
+    #             mse.append((x - self.x_q[i])**2)
+    #         else:
+    #             concat_ch = (0, 2, 3) if RUN_CHANNEL_WISE else (2, 3)
+    #             mse.append(torch.sum((x - self.x_q[i])**2, dim=concat_ch))
+    #     mse = torch.stack(mse, dim=0)
+    #     _, min_index = torch.min(mse, dim=0)
         
-        remain_probability = (1.0-clip)/(shiftNum-1)
-        alpha = torch.full((*min_index.shape, shiftNum), remain_probability, dtype=torch.float, device=device)
+    #     remain_probability = (1.0-clip)/(shiftNum-1)
+    #     alpha = torch.full((*min_index.shape, shiftNum), remain_probability, dtype=torch.float, device=device)
         
-        mask = torch.zeros((*min_index.shape, shiftNum), dtype=torch.bool)
-        # Set the values of mask based on the values of index
-        for i in range(shiftNum):
-            if mask.dim() == 3:
-                mask[:, :, i] = (min_index == i)
-            else:
-                mask[:, i] = (min_index == i)
-        alpha[mask] = clip
-        return self.inverse_softmax(alpha)
+    #     mask = torch.zeros((*min_index.shape, shiftNum), dtype=torch.bool)
+    #     # Set the values of mask based on the values of index
+    #     for i in range(shiftNum):
+    #         if mask.dim() == 3:
+    #             mask[:, :, i] = (min_index == i)
+    #         else:
+    #             mask[:, i] = (min_index == i)
+    #     alpha[mask] = clip
+    #     return self.inverse_softmax(alpha)
     
     
     def init_alpha(self, x: torch.Tensor, clip = 0.80, device='cuda'):
-        RUN_CHANNEL_WISE = True #NOTE: temp code Full granuarity
-        # RUN_CHANNEL_WISE = False #NOTE: temp code Full granuarity
         # #TODO: Temp code min_index is always point to 1.0
-        clip = 0.8
+        clip = 0.33
         shiftNum = len(self.shiftTarget)
         mse = []
         
@@ -151,7 +165,7 @@ class ChannelQuant(nn.Module):
             if self.isFC:
                 mse.append((x - self.x_q[i])**2)
             else:
-                concat_ch = (0, 2, 3) if RUN_CHANNEL_WISE else (2, 3)
+                concat_ch = (0, 2, 3) if self.RUN_CHANNEL_WISE else (2, 3)
                 mse.append(torch.sum((x - self.x_q[i])**2, dim=concat_ch))
         mse = torch.stack(mse, dim=0)
         _, min_index = torch.min(mse, dim=0)
@@ -223,12 +237,50 @@ class ChannelQuant(nn.Module):
         return delta
     
     @torch.no_grad()
-    def init_v_beta_default(self):
-        pass
+    def init_shift_candidates(self, x):
+        num_of_candi = 3
+        candidates = [i/8 for i in range(1, 16) if i!=8]
+        mse_candidates = []
+        for st in candidates:
+            x_q = torch.round(x/(self.delta*st))
+            if self.sym:
+                x_q = torch.clamp(x_q + self.zero_point, -self.n_levels//2, self.n_levels//2 - 1)
+            else:
+                x_q = torch.clamp(x_q + self.zero_point, 0, self.n_levels - 1)
+            x_float = (x_q - self.zero_point) * (self.delta*st)
+            x_mse = (x_float - x).abs().pow(2.4)
+            if self.RUN_CHANNEL_WISE:
+                if self.isFC:
+                    mse = x_mse.sum(dim=(0))
+                else:
+                    mse = x_mse.sum(dim=(0, -1, -2))
+            else:
+                if self.isFC:
+                    mse = x_mse.sum(dim=(-1, -2))
+                else:
+                    mse = x_mse
+                mse = mse.flatten()
+                    
+            mse_candidates.append(mse)
+        
+        mse_candidates = torch.stack(mse_candidates, dim=0)
+        scores = dict()
+        for i in range(mse_candidates.shape[0]):
+            scores[i] = 0
+        for i in range(mse_candidates.shape[1]):
+            sorted_indices = torch.argsort(mse_candidates[:, i])
+            for j in range(num_of_candi):
+                scores[sorted_indices[j].item()] += num_of_candi - j
+        sorted_dict = dict(sorted(scores.items(), key=lambda x: x[1], reverse=True))
+        top_keys = list(sorted_dict.keys())[:(num_of_candi-1)]
+        self.shiftTarget = [candidates[i] for i in top_keys]
+        self.shiftTarget.append(1.0)
     
     @torch.no_grad()
     def init_v_beta(self, x: torch.Tensor):
+        self.init_shift_candidates(x)
         shiftTarget = self.shiftTarget
+        print(f"{self.name}, Optimal shift candidates: ", shiftTarget)
         for st in shiftTarget:
             self.shiftedScale = st
             self.x_q.append(torch.floor(x/(self.delta*self.shiftedScale)))

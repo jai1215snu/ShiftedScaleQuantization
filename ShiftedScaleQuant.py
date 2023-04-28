@@ -137,10 +137,10 @@ def channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, subArgs, a
         batch_size=args.batch_size,
         bypassChannelShift=args.bypassChannelShift,
     )
-    # skipShiftLayer = [
-    #     '.model.layer4.1',
-    #     '.model.fc',
-    # ]
+    skipShiftLayer = [
+        # '.model.layer4.1',
+        # '.model.fc',
+    ]
     k_lmda = subArgs['lmda']
     k_iters = subArgs['iters']
     #My options
@@ -174,6 +174,7 @@ def channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, subArgs, a
     loss_dic = dict()
     for layer in layerEnabled:
         print("Reconstructing Layer[Weight]: ", layer)
+        kwargs['iters'] = k_iters if layer not in ['.model.layer4.1'] else k_iters*3//2
         #Before Quant
         #Cache input features(with quant state)
         set_cache_state(qnn, [layer], prv_name='', state='if')
@@ -205,7 +206,7 @@ def channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, subArgs, a
         
         # #Hard Result
         # QuantRecursiveToggle_hardTarget(qnn, [layer], '', **kwargs)
-        if layer in ['.model.layer4.1', '.model.fc']:
+        if k_iters>0 and layer in ['.model.layer4.1', '.model.fc']:
             accuracys += [validate_model(test_loader, qnn, print_result=True).cpu().numpy()]
             print(f'accuracy of qnn_hard{layer:28s}    : {accuracys[-1]:.3f}')
         
@@ -248,7 +249,7 @@ def channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, subArgs, ar
     kwargs['iters'] = k_iters
     kwargs['shiftTarget'] = subArgs['shiftTarget']
     kwargs['skipShiftLayer'] = skipShiftLayer
-    #print(f'accuracy of qnn   : {validate_model(test_loader, qnn):.3f}')
+    # print(f'accuracy of qnn   : {validate_model(test_loader, qnn, print_result=True):.3f}')
     layerEnabled = [
         '.model.layer1.0',
         '.model.layer1.1',
@@ -313,23 +314,35 @@ if __name__ == '__main__':
     botInfo = {'token':'5820626937:AAHHsvT__T7xkCiLujwi799CyMoWtwNkbTM', 'id':'5955354823'} if args.msg_bot_enable else None
 
     # #Add these to common parameters
-    # itr = 80000
-    itr = 100
-    lmda = 3
-    # shiftTarget = [2/2]
-    # shiftTarget = [2/2, 1/2]
-    shiftTargets = [[2/2, 1/2, 3/2]]
-    shiftTargets += [[4/4, 3/4, 5/4]]
-    shiftTargets += [[4/4, 2/4, 1/4]]
+    itr = 80000
+    # itr = 100
+    lmda = 2
+    shiftTargets = [[100]]
+    # shiftTarget = [3/4, 3/2]
+    # shiftTargets = [[2/2, 1/2, 3/2],[4/4, 3/4, 5/4],[8/8, 7/8, 9/8]]
+    # shiftTargets = [[2/2, 1/2, 3/2]]
+    # shiftTargets += [[4/4, 3/4, 5/4]]
+    # shiftTarget = [8/8, 4/8, 2/8, 1/8]
+    # shiftTarget = [1.5, 1.25, 1.0]
     # shiftTargets = [[2/2, 1/2], [2/2, 3/2, 1/2], [4/4, 5/4, 3/4]]
     # shiftTargets = [[2/2, 3/2, 1/2], [4/4, 5/4, 3/4], [4/4, 5/4, 3/4]]
     # # # # for itr in [1000, 4000, 8000]:
-    for lmda in range(1, 4):
+    # for lmda in range(2, 4):
+    lmdas = [(i+1)/3 for i in range(6)]
+    for lmda in lmdas:
         for shiftTarget in shiftTargets:
             kwargs = dict()
             kwargs['iters'] = itr
             kwargs['lmda'] = (10)**(-lmda)
             kwargs['shiftTarget'] = shiftTarget
             qnn = channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, kwargs, args)
-                # channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, kwargs, args)
+        # params_dict = {}
+        # for name, param in qnn.named_parameters():    # for name, param in qnn.named_parameters():
+        #     print("torch saving ", name, param.data.shape)
+        #     params_dict[name] = param.data
+        # torch.save(params_dict, f'./qnn_with_weight.pth')
+        # param_st = torch.load('qnn_weight_quant.pth')
+        # qnn.load_state_dict(param_st)
+        # kwargs['iters'] = 100
+        # channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, kwargs, args)
     

@@ -79,6 +79,7 @@ class UniformAffineQuantizer(nn.Module):
                 delta, zero_point = self.init_quantization_scale(x, self.channel_wise)
                 self.delta = torch.nn.Parameter(delta)
                 self.zero_point = torch.nn.Parameter(zero_point)
+                print("Making initialization")
             else:
                 self.delta, self.zero_point = self.init_quantization_scale(x, self.channel_wise)
             
@@ -86,7 +87,10 @@ class UniformAffineQuantizer(nn.Module):
 
         # start quantization
         x_int = round_ste(x / self.delta) + self.zero_point
-        x_quant = torch.clamp(x_int, 0, self.n_levels - 1)
+        if self.sym:
+            x_quant = torch.clamp(x_int, -self.n_levels//2, self.n_levels//2 - 1)
+        else:
+            x_quant = torch.clamp(x_int, 0, self.n_levels - 1)
         x_dequant = (x_quant - self.zero_point) * self.delta
         return x_dequant
 
@@ -118,7 +122,6 @@ class UniformAffineQuantizer(nn.Module):
                     x_min = x_min * (self.n_bits + 2) / 8
                     x_max = x_max * (self.n_bits + 2) / 8
 
-                x_absmax = max(abs(x_min), x_max)
                 if self.sym:
                     x_min, x_max = -x_absmax if x_min < 0 else 0, x_absmax
 
@@ -134,6 +137,9 @@ class UniformAffineQuantizer(nn.Module):
                 x_max = x.max()
                 x_min = x.min()
                 best_score = 1e+10
+                if self.sym:
+                    x_absmax = max(abs(x_min), x_max)
+                    x_min, x_max = -x_absmax if x_min < 0 else 0, x_absmax
                 for i in range(80):
                     new_max = x_max * (1.0 - (i * 0.01))
                     new_min = x_min * (1.0 - (i * 0.01))
@@ -144,7 +150,7 @@ class UniformAffineQuantizer(nn.Module):
                     if score < best_score:
                         best_score = score
                         delta = (new_max - new_min) / (2 ** self.n_bits - 1)
-                        zero_point = (- new_min / delta).round()
+                        zero_point = (- new_min / delta).round() if not self.sym else 0
             else:
                 raise NotImplementedError
 
@@ -213,6 +219,11 @@ class QuantModule(nn.Module):
         self.cached_inp_features = []
         self.cached_out_features = []
         
+        
+        n_ch = self.weight.shape[0]
+        self.alpha_out = torch.nn.Parameter(torch.ones(n_ch) .view(1, n_ch, 1, 1))
+        self.beta_out  = torch.nn.Parameter(torch.zeros(n_ch).view(1, n_ch, 1, 1))
+        
         self.selection = None # for greedy selection
         
         self.selectionInited = False
@@ -231,6 +242,10 @@ class QuantModule(nn.Module):
             bias = self.org_bias
             
         out = self.fwd_func(input, weight, bias, **self.fwd_kwargs)
+        
+        if self.use_weight_quant and self.cache_features == 'none':
+            out = out * self.alpha_out + self.beta_out
+            
 
         if self.se_module is not None:
             out = self.se_module(out)

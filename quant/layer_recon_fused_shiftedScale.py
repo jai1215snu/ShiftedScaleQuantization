@@ -10,17 +10,29 @@ import torch.optim.lr_scheduler as lr_scheduler
 from quant.channelQuantAct import ChannelQuantAct
 from tqdm import tqdm, trange
 
+def print_ratio(quantizers):
+    for qt in quantizers:
+        soft_target = qt.get_sig_soft_targets().detach().cpu().numpy()
+        max_index = np.argmax(soft_target, axis=-1)
+        values, counts = np.unique(max_index, return_counts=True)
+        total_cnt = np.sum(counts)
+        count_dict = dict(zip(values, counts/total_cnt))
+        dump_str = ' '.join([f'{k}:{v:.3f}' for k,v in count_dict.items()])
+        print(f'{qt.name}[{total_cnt}] : {dump_str}')
+
 def block_recon_fused_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lmda: list = [1.,1.], model=None, test_loader=None, act=False, adaround=False, useShiftedScale=True):
     block.train()
     warmup = 0.2
     p = 2.0
     b_range = (20, 2)
     device = next(model.parameters()).device
-    lr = 4e-4
+    lr = 0.001
     scheduler = None
     
     quantizers = []
     opt_params = []
+    p0 = None
+    p1 = None
     if act:
         #Init setting for all weight quantizer
         for name, module in block.named_modules():
@@ -28,7 +40,7 @@ def block_recon_fused_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lm
                 if module.act_quantizer.disable_act_quant:
                     continue
                 module.act_quantizer = ChannelQuantAct(uaq=module.act_quantizer, shiftTarget=[2/2, 1/2])
-                module.act_quantizer.init_v_beta(x=None)
+                module.act_quantizer.init_v()
                 opt_params += [module.act_quantizer.alpha]
                 quantizers += [module.act_quantizer]
                 module.act_quantizer.opt_mode = 'shiftFeature'
@@ -37,28 +49,34 @@ def block_recon_fused_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lm
                 if module.disable_act_quant:
                     continue
                 module = ChannelQuantAct(uaq=module.act_quantizer, shiftTarget=[2/2, 1/2])
-                module.init_v_beta_default(x=None)
+                module.init_v()
                 opt_params += [module.alpha]
                 quantizers += [module]
                 module.opt_mode = 'shiftFeature'
         optimizer = torch.optim.Adam(opt_params, lr=lr)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=iters, eta_min=0.)
+        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=iters, eta_min=0.)
     else:
         #Init setting for all weight quantizer
         for name, module in block.named_modules():
             if isinstance(module, QuantModule):
                 weight_tensor=module.org_weight.data
+                np.save(f'{name}.npy', weight_tensor.detach().cpu().numpy())
                 module.weight_quantizer.init_v_beta(x=weight_tensor.clone().detach())
                 opt_params += [module.weight_quantizer.beta]
                 opt_params += [module.weight_quantizer.alpha]
+                opt_params += [module.alpha_out]
+                opt_params += [module.beta_out]
+                p0 = module.alpha_out
+                p1 = module.beta_out
                 quantizers += [module.weight_quantizer]
                 module.weight_quantizer.opt_mode = 'adaShift'
-        optimizer = torch.optim.Adam(opt_params)
+        optimizer = torch.optim.Adam(opt_params, lr=lr)
     opt_param_num = sum([p.numel() for p in opt_params])
     print("number of elements in opt_params: {}".format(opt_param_num))
     loss_mode = 'none' if act else 'relaxation'
     
     # lmda = lmda * opt_param_num
+    #TODO: power
     loss_func = FusedScaleLossFunction(block, quantizers, round_loss=loss_mode, lmda=lmda,
                             max_count=iters, b_range=b_range,
                             decay_start=0, warmup=warmup, p=p)
@@ -72,7 +90,7 @@ def block_recon_fused_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lm
     t = tqdm(range(total_idx), desc=f'', dynamic_ncols=True)
     
     probs = []
-        
+    
     for i in t:
         permIdx = torch.randperm(cached_inp.size(0))[:batch_size]
         cur_inp = cached_inp[permIdx].to(device)
@@ -91,7 +109,7 @@ def block_recon_fused_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lm
             start_loss = max(start_loss, loss_func.rec_loss)
             # print(f"{start_loss:.6f} -> {loss_func.rec_loss:.6f} {loss_func.round_loss_val:.3f}")
             t.set_description(f"{start_loss:.6f} -> {loss_func.rec_loss:.6f} {loss_func.round_loss_val} ")
-            probs.append(quantizers[0].get_sig_soft_targets().detach().cpu().numpy())
+            # probs.append(quantizers[1].get_sig_soft_targets().detach().cpu().numpy())
     
     # with open("./temp/probs.npy", "wb") as f:
     #     np.save(f, np.array(probs))
@@ -117,6 +135,7 @@ def block_recon_fused_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lm
     print(f"Hard Round : {start_loss:.6f} -> {loss_func.rec_loss:.6f} {loss_func.round_loss_val}")
     rec_loss_out.append(loss_func.rec_loss)
     
+    print_ratio(quantizers)
     torch.cuda.empty_cache()
     model.eval()
     return rec_loss_out
@@ -130,16 +149,21 @@ def layer_recon_fused_shiftedScale(layer: QuantModule, iters: int = 20000, lmda:
     device = next(model.parameters()).device
 
     #Torch Parallel
+    quantizers = [layer.weight_quantizer]
     weight_tensor=layer.org_weight.data
     layer.weight_quantizer.init_v_beta(x=weight_tensor.clone().detach())
     opt_params = [layer.weight_quantizer.beta]
-    opt_params = [layer.weight_quantizer.alpha]
+    opt_params += [layer.weight_quantizer.alpha]
+    opt_params += [layer.alpha_out]
+    opt_params += [layer.beta_out]
     layer.weight_quantizer.opt_mode = 'adaShift'
     optimizer = torch.optim.Adam(opt_params)
     scheduler = None
     # scheduler = lr_scheduler.StepLR(optimizer, step_size=2500, gamma=0.3)
     loss_mode = 'none' if act else 'relaxation'
-    loss_func = FusedScaleLossFunction(layer, [layer.weight_quantizer], round_loss=loss_mode, lmda=lmda,
+    #TODO: power
+    p = 1.0
+    loss_func = FusedScaleLossFunction(layer, quantizers, round_loss=loss_mode, lmda=lmda,
                             max_count=iters, b_range=b_range,
                             decay_start=0, warmup=warmup, p=p, adaround=adaround)
     
@@ -191,6 +215,7 @@ def layer_recon_fused_shiftedScale(layer: QuantModule, iters: int = 20000, lmda:
     print(f"Hard Round : {start_loss:.6f} -> {loss_func.rec_loss:.6f} {loss_func.round_loss_val}")
     rec_loss_out.append(loss_func.rec_loss)
     
+    print_ratio(quantizers)
     torch.cuda.empty_cache()
     model.eval()
     return rec_loss_out
@@ -237,6 +262,8 @@ class FusedScaleLossFunction:
         :return: total loss function
         """
         rec_loss = lp_loss(pred, tgt, p=self.p)
+        # huber_loss = nn.SmoothL1Loss()
+        # rec_loss = huber_loss(pred, tgt)
         round_lossR = 0
         round_lossS = 0
         
@@ -267,6 +294,7 @@ class FusedScaleLossFunction:
         
         #For report
         self.total_loss = total_loss.item()
+        
         self.rec_loss = rec_loss.item()
         self.round_loss_val = f'R:{round_lossR:.3f} S:{round_lossS:.3f}'
         self.b = b
@@ -367,5 +395,5 @@ class FusedLinearTempDecayShift:
         if t < self.start_decay:
             return self.start_b
         else:
-            rel_t = (t - self.start_decay) / (self.t_max - self.start_decay)
+            rel_t = (t - self.start_decay) / (self.t_max - self.start_decay) if self.t_max != 0 else 1
             return self.end_b + (self.start_b - self.end_b) * max(0.0, (1 - rel_t))

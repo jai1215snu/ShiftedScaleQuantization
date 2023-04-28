@@ -197,8 +197,11 @@ def init_delta_zero(args, cali_data, test_loader):
         print(f'accuracy of original : {validate_model(test_loader, cnn):.3f}')
     
     # build quantization parameters
-    wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'tune_delta_zero':True, 'leaf_param':True} #NOTE: tune_delta_zero is True
-    aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'tune_delta_zero':True, 'leaf_param': args.act_quant}
+    # wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'tune_delta_zero':True, 'leaf_param':True}
+    # aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'tune_delta_zero':True, 'leaf_param': args.act_quant}
+    
+    wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'tune_delta_zero':True, 'leaf_param':True, 'symmetric':True} #NOTE: tune_delta_zero is True
+    aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'tune_delta_zero':True, 'leaf_param': True, 'symmetric':False}
     qnn = QuantModel(model=cnn, weight_quant_params=wq_params, act_quant_params=aq_params)
     # qnn.cuda()
     qnn.to(args.run_device)
@@ -244,8 +247,11 @@ def build_qnn(args, test_loader):
         print(f'accuracy of original : {validate_model(test_loader, cnn):.3f}')
     
     # build quantization parameters
-    wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'tune_delta_zero':False}
-    aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'tune_delta_zero':False, 'leaf_param': True}
+    # wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'tune_delta_zero':False, 'symmetric':True}
+    # aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'tune_delta_zero':False, 'leaf_param': True, 'symmetric':False}
+    #TODO:
+    wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'tune_delta_zero':False, 'symmetric':False}
+    aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'tune_delta_zero':False, 'leaf_param': True, 'symmetric':False}
     qnn = QuantModel(model=cnn, weight_quant_params=wq_params, act_quant_params=aq_params)
     # qnn.cuda()
     qnn.to(args.run_device)
@@ -259,7 +265,14 @@ def build_qnn(args, test_loader):
         prefix = 'CIFAR10'
     elif args.dataset == 'imagenet':
         prefix = 'IMAGENET'
-    qnn.load_state_dict(torch.load(f'./checkPoint/{prefix}_QNN_CW_W{args.n_bits_w}_A{args.n_bits_a}.pth'))
+    
+    st = torch.load(f'./checkPoint/{prefix}_QNN_CW_W{args.n_bits_w}_A{args.n_bits_a}.pth')
+    missing = ["model.conv1.alpha_out", "model.conv1.beta_out", "model.layer1.0.conv1.alpha_out", "model.layer1.0.conv1.beta_out", "model.layer1.0.conv2.alpha_out", "model.layer1.0.conv2.beta_out", "model.layer1.1.conv1.alpha_out", "model.layer1.1.conv1.beta_out", "model.layer1.1.conv2.alpha_out", "model.layer1.1.conv2.beta_out", "model.layer2.0.conv1.alpha_out", "model.layer2.0.conv1.beta_out", "model.layer2.0.conv2.alpha_out", "model.layer2.0.conv2.beta_out", "model.layer2.0.downsample.alpha_out", "model.layer2.0.downsample.beta_out", "model.layer2.1.conv1.alpha_out", "model.layer2.1.conv1.beta_out", "model.layer2.1.conv2.alpha_out", "model.layer2.1.conv2.beta_out", "model.layer3.0.conv1.alpha_out", "model.layer3.0.conv1.beta_out", "model.layer3.0.conv2.alpha_out", "model.layer3.0.conv2.beta_out", "model.layer3.0.downsample.alpha_out", "model.layer3.0.downsample.beta_out", "model.layer3.1.conv1.alpha_out", "model.layer3.1.conv1.beta_out", "model.layer3.1.conv2.alpha_out", "model.layer3.1.conv2.beta_out", "model.layer4.0.conv1.alpha_out", "model.layer4.0.conv1.beta_out", "model.layer4.0.conv2.alpha_out", "model.layer4.0.conv2.beta_out", "model.layer4.0.downsample.alpha_out", "model.layer4.0.downsample.beta_out", "model.layer4.1.conv1.alpha_out", "model.layer4.1.conv1.beta_out", "model.layer4.1.conv2.alpha_out", "model.layer4.1.conv2.beta_out", "model.fc.alpha_out", "model.fc.beta_out"]
+    for param in qnn.state_dict():
+        if param in missing:
+            st[param] = qnn.state_dict()[param]
+    
+    qnn.load_state_dict(st)
     qnn.set_quant_init_state() #set weight_quantizer.inited = True
     
     if not args.skip_test:

@@ -43,6 +43,7 @@ def loadArgments():
     
     #choigj
     parser.add_argument('--make_checkpoint', default=False, type=bool, help='generate checkpoint')
+    # parser.add_argument('--make_checkpoint', default=True, type=bool, help='generate checkpoint')
     parser.add_argument('--skip_test', default=True, type=bool, help='skip default test')
     parser.add_argument('--run_device', default='cuda:0', type=str, help='gpu usage')
     parser.add_argument('--msg_bot_enable', default=True, type=bool, help='use messaging bot for monitoring')

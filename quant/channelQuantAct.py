@@ -66,6 +66,30 @@ class ChannelQuantAct(nn.Module):
         x_float_q = x_quant * (self.delta*self.shiftedScale)
         return x_float_q
     
+    def shifted_x_quant(self):#TODO: from here make function for activation
+        p = self.get_sig_soft_targets()
+        if p.dim() == 2:
+            p = p.unsqueeze(0)
+        if self.hard_targets:#hard target
+            max_index = torch.argmax(p, dim=-1)
+            x_out = self.x_q[0]
+            for i in range(1, len(self.shiftTarget)):
+                mask = max_index == i
+                if not self.isFC:
+                    mask = mask.unsqueeze(-1).unsqueeze(-1)
+                x_out = torch.where(mask, self.x_q[i], x_out)
+        else: #soft target
+            if self.isFC:
+                x_out = (self.x_q[0] * p[:, :, 0])
+                for i in range(1, len(self.shiftTarget)):
+                    x_out +=  (self.x_q[i] * p[:, :, i])
+            else:
+                p = p.unsqueeze(-1).unsqueeze(-1)
+                x_out = (self.x_q[0] * p[:, :, 0, :, :])
+                for i in range(1, len(self.shiftTarget)):
+                    x_out += (self.x_q[i]* p[:, :, i, :, :])
+        return x_out
+    
     def get_sig_soft_targets(self):
         return torch.clamp(F.softmax(self.alpha, dim=-1) * (self.zeta - self.gamma) + self.gamma, 0, 1)
     
@@ -99,7 +123,7 @@ class ChannelQuantAct(nn.Module):
         return delta
     
     @torch.no_grad()
-    def init_v(self, x: torch.Tensor):
+    def init_v(self):
         shiftTarget = self.shiftTarget
         for st in shiftTarget:
             self.shiftedScale = st
@@ -107,8 +131,4 @@ class ChannelQuantAct(nn.Module):
         self.shiftedScale = 1.0
         self.alpha = self.init_alpha(x, clip = (0.90-0.05*len(shiftTarget)), device=self.device)
         delta = self.get_delta()
-        x_floor = torch.floor(x/delta)
-        rest = (x / delta) - x_floor  # rest of rounding [0, 1)
-        beta = -torch.log((self.zeta - self.gamma) / (rest - self.gamma) - 1)  # => sigmoid(beta) = rest
         self.alpha = nn.Parameter(self.alpha)
-        self.beta = nn.Parameter(beta)
