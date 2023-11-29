@@ -4,6 +4,17 @@ import numpy as np
 import torch
 import argparse
 import time
+from icecream import ic
+from datetime import datetime
+import time
+
+def time_format():
+    return f'{datetime.now():%Y-%m-%d %H:%M:%S}'
+
+# ic.configureOutput(prefix=time_format, includeContext=True)
+ic.configureOutput(includeContext=True)
+ic.disable()
+
 
 def loadArgments():
     parser = argparse.ArgumentParser(description='running parameters',
@@ -15,8 +26,8 @@ def loadArgments():
                         choices=['resnet18', 'resnet50', 'mobilenetv2', 'regnetx_600m', 'regnetx_3200m', 'mnasnet'])
     parser.add_argument('--batch_size', default=64, type=int, help='mini-batch size for data loader')
     parser.add_argument('--workers', default=4, type=int, help='number of workers for data loader')
-    # parser.add_argument('--data_path', default='~/dataset/cifar10', type=str, help='path to Cifar10 data', required=False)
-    parser.add_argument('--data_path', default='~/dataset/imagenet', type=str, help='path to Cifar10 data', required=False)
+    parser.add_argument('--data_path', default='~/dataset/cifar10', type=str, help='path to Cifar10 data', required=False)
+    # parser.add_argument('--data_path', default='~/dataset/imagenet', type=str, help='path to Cifar10 data', required=False)
 
     # quantization parameters
     parser.add_argument('--n_bits_w', default=2, type=int, help='bitwidth for weight quantization')
@@ -44,13 +55,22 @@ def loadArgments():
     #choigj
     parser.add_argument('--make_checkpoint', default=False, type=bool, help='generate checkpoint')
     # parser.add_argument('--make_checkpoint', default=True, type=bool, help='generate checkpoint')
-    parser.add_argument('--skip_test', default=True, type=bool, help='skip default test')
+    parser.add_argument('--skip_test', default=False, type=bool, help='skip default test')
     parser.add_argument('--run_device', default='cuda:0', type=str, help='gpu usage')
     parser.add_argument('--msg_bot_enable', default=True, type=bool, help='use messaging bot for monitoring')
     parser.add_argument('--make_init_data', default=False, type=bool, help='Make Initiallize weight data')
-    # parser.add_argument('--dataset', default='cifar10', type=str, help='dataset name')
-    parser.add_argument('--dataset', default='imagenet', type=str, help='dataset name')
+    parser.add_argument('--dataset', default='cifar10', type=str, help='dataset name')
+    # parser.add_argument('--dataset', default='imagenet', type=str, help='dataset name')
     parser.add_argument('--bypassChannelShift', default=False, type=bool, help='do not run channel shift function')
+    
+    #Shift Quantization
+    parser.add_argument('--mse_level',          default=1,   type=int, help='1, 2, 4, ...')
+    parser.add_argument('--mse_threshold',      default=1.0, type=float, help='round 범위 얼마나 넓게 할지')
+    parser.add_argument('--shift_quant_mode',   default='max', type=str, help='mse or max')
+    parser.add_argument('--w_scale_method', default='mse', type=str, help='mse or max')
+    parser.add_argument('--a_scale_method', default='mse', type=str, help='mse or max')
+    
+    parser.add_argument('--test', default=False, type=bool, help='test')
     
     return parser.parse_args()
     
@@ -130,7 +150,7 @@ def get_train_samples(train_loader, num_samples):
     return torch.cat(train_data, dim=0)[:num_samples]
 
 @torch.no_grad()
-def validate_model(val_loader, model, device=None, print_freq=100, print_result=False, simple=False):
+def validate_model(val_loader, model, device=None, print_freq=100, print_result=False, simple=False, bit=-1):
     if device is None:
         device = next(model.parameters()).device
     else:
@@ -148,7 +168,9 @@ def validate_model(val_loader, model, device=None, print_freq=100, print_result=
     # switch to evaluate mode
     model.eval()
     
-
+    
+    output_list = []
+    
     end = time.time()
     for i, (images, target) in enumerate(val_loader):
         images = images.to(device)
@@ -156,6 +178,8 @@ def validate_model(val_loader, model, device=None, print_freq=100, print_result=
 
         # compute output
         output = model(images)
+        if bit != -1:
+            output_list.append(output)
         
         #Predicted
         _, predicted = torch.max(output.data, 1)
@@ -177,15 +201,96 @@ def validate_model(val_loader, model, device=None, print_freq=100, print_result=
             
         if simple and i > 5:
             break
-            
-            
+    
+    
+    if bit != -1:
+        # Stack the output tensors
+        stacked_output = torch.cat(output_list, dim=0)
+        # print('shape : ', stacked_output.shape)
+        # Save the stacked output to a file
+        ref_out = torch.load(f'./output_loss/result_{bit}bit.pt')
+        mse = torch.mean(torch.square(stacked_output - ref_out))
+        # print(f'MSE[{bit}] : {mse:.2e}')
+        # torch.save(stacked_output, f'./output_loss/result_{bit}bit.pt')
+    
     acc = 100 * correct / total
 
     # print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'.format(top1=top1, top5=top5))
     if print_result:
         print(' * Acc@1 {top1.avg:.3f}'.format(top1=top1))
-
     return top1.avg
+
+
+@torch.no_grad()
+def validate_with_loss(val_loader, model, device=None, print_freq=100, print_result=False, simple=False, bit=-1):
+    if device is None:
+        device = next(model.parameters()).device
+    else:
+        model.to(device)
+    correct = 0
+    total = 0
+    batch_time = AverageMeter('Time', ':6.3f')
+    top1 = AverageMeter('Acc@1', ':6.2f')
+    top5 = AverageMeter('Acc@5', ':6.2f')
+    progress = ProgressMeter(
+        len(val_loader),
+        [batch_time, top1, top5],
+        prefix='Test: ')
+
+    # switch to evaluate mode
+    model.eval()
+    
+    
+    output_list = []
+    
+    end = time.time()
+    for i, (images, target) in enumerate(val_loader):
+        images = images.to(device)
+        target = target.to(device)
+
+        # compute output
+        output = model(images)
+        if bit != -1:
+            output_list.append(output)
+        
+        #Predicted
+        _, predicted = torch.max(output.data, 1)
+        total += target.size(0)
+        correct += (predicted == target).sum().item()
+        
+        # measure accuracy and record loss
+        
+        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        top1.update(acc1[0], images.size(0))
+        top5.update(acc5[0], images.size(0))
+
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
+
+        if i % print_freq == 0 and print_result:
+            progress.display(i)
+            
+        if simple and i > 5:
+            break
+    
+    mse = 0
+    if bit != -1:
+        # Stack the output tensors
+        stacked_output = torch.cat(output_list, dim=0)
+        print('shape : ', stacked_output.shape)
+        # Save the stacked output to a file
+        ref_out = torch.load(f'./output_loss/result_{bit}bit.pt')
+        mse = torch.mean(torch.square(stacked_output - ref_out))
+        print(f'MSE[{bit}] : {mse:.2e}')
+        # torch.save(stacked_output, f'./output_loss/result_{bit}bit.pt')
+    
+    acc = 100 * correct / total
+
+    # print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'.format(top1=top1, top5=top5))
+    if print_result:
+        print(' * Acc@1 {top1.avg:.3f}'.format(top1=top1))
+    return top1.avg, mse
 
 def print_model_hierarchy(model, depth=0):
     for name, child in model.named_children():

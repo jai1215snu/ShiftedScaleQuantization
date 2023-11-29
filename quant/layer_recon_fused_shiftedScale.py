@@ -33,6 +33,7 @@ def block_recon_fused_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lm
     opt_params = []
     p0 = None
     p1 = None
+    
     if act:
         #Init setting for all weight quantizer
         for name, module in block.named_modules():
@@ -60,12 +61,11 @@ def block_recon_fused_shiftedScale(block: BaseQuantBlock, iters: int = 20000, lm
         for name, module in block.named_modules():
             if isinstance(module, QuantModule):
                 weight_tensor=module.org_weight.data
-                np.save(f'{name}.npy', weight_tensor.detach().cpu().numpy())
                 module.weight_quantizer.init_v_beta(x=weight_tensor.clone().detach())
-                opt_params += [module.weight_quantizer.beta]
+                # opt_params += [module.weight_quantizer.beta]
                 opt_params += [module.weight_quantizer.alpha]
-                opt_params += [module.alpha_out]
-                opt_params += [module.beta_out]
+                # opt_params += [module.alpha_out]
+                # opt_params += [module.beta_out]
                 p0 = module.alpha_out
                 p1 = module.beta_out
                 quantizers += [module.weight_quantizer]
@@ -152,10 +152,10 @@ def layer_recon_fused_shiftedScale(layer: QuantModule, iters: int = 20000, lmda:
     quantizers = [layer.weight_quantizer]
     weight_tensor=layer.org_weight.data
     layer.weight_quantizer.init_v_beta(x=weight_tensor.clone().detach())
-    opt_params = [layer.weight_quantizer.beta]
+    # opt_params = [layer.weight_quantizer.beta]
     opt_params += [layer.weight_quantizer.alpha]
-    opt_params += [layer.alpha_out]
-    opt_params += [layer.beta_out]
+    # opt_params += [layer.alpha_out]
+    # opt_params += [layer.beta_out]
     layer.weight_quantizer.opt_mode = 'adaShift'
     optimizer = torch.optim.Adam(opt_params)
     scheduler = None

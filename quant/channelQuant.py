@@ -278,7 +278,7 @@ class ChannelQuant(nn.Module):
     
     @torch.no_grad()
     def init_v_beta(self, x: torch.Tensor):
-        self.init_shift_candidates(x)
+        # self.init_shift_candidates(x)
         shiftTarget = self.shiftTarget
         print(f"{self.name}, Optimal shift candidates: ", shiftTarget)
         for st in shiftTarget:

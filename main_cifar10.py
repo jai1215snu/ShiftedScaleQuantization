@@ -31,7 +31,7 @@ if __name__ == '__main__':
     qnn.cuda()
     qnn.eval()
     if not args.disable_8bit_head_stem:
-        print('Setting the first and the last layer to 8-bit')
+        # print('Setting the first and the last layer to 8-bit')
         qnn.set_first_last_layer_to_8bit()
 
     cali_data = get_train_samples(train_loader, num_samples=args.num_samples)

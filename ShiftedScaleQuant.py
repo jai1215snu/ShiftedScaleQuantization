@@ -1,19 +1,13 @@
 #Training Set
 import torch.nn as nn
+import pickle
 from data.cifar10 import build_cifar10_data
 from data.imagenet import build_imagenet_data
 from quant.quant_layer import QuantModule
 from quant.quant_block import BaseQuantBlock, QuantBasicBlock
-import pickle
 from myScaledMethods import *
 from quant.layer_recon_shiftedScale import *
 from quant.layer_recon_fused_shiftedScale import *
-
-#multi gpus
-# import linklink as link
-# from linklink.dist_helper import dist_init, allaverage
-# import torch.distributed as dist
-# import torch.multiprocessing as mp
 
 def QuantRecursiveShiftRecon(model: nn.Module, layerEnabled, qnn, test_loader, prv_name="", ret=dict(), act=False, **kwargs):
     for name, module in model.named_children():
@@ -122,7 +116,73 @@ def run_ShiftReconFused(model, curName, module, qnn, test_loader, act=False, **k
 def toggle_hardTarget(model, curName, layer, **kwargs):
     layer.weight_quantizer.hard_targets = not layer.weight_quantizer.hard_targets
     
-def channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, subArgs, args):
+def channelShift_wMSE(test_loader, train_loader, cali_data, subArgs, args):
+    kwargs = dict(
+        cali_data=cali_data, 
+        iters=args.iters_w, 
+        weight=args.weight, 
+        asym=True,
+        b_range=(args.b_start, args.b_end), 
+        warmup=args.warmup, 
+        act_quant=False, 
+        opt_mode=args.shift_quant_mode, 
+        eval=True,
+        returnLoss=True,
+        batch_size=args.batch_size,
+        bypassChannelShift=args.bypassChannelShift,
+        level=args.mse_level,
+        threshold=args.mse_threshold,
+    )
+    qnn = build_qnn(args, test_loader)
+    qnn.set_quant_state(True, False)
+    _ = qnn(cali_data[:64].to(device))
+    if not args.skip_test:
+        print(f'accuracy of qnn (with cal.)  : {validate_model(test_loader, qnn, bit=args.n_bits_w):.3f}')
+        
+    layerDisabled = [
+        # '.model.layer1.0',
+        # '.model.layer1.1',
+        # '.model.layer2.0',
+        # '.model.layer2.1',
+        # '.model.layer3.0',
+        # '.model.layer3.1',
+        # '.model.layer4.0',
+        # '.model.layer4.1',
+        '.model.fc',
+    ]
+    kwargs['shiftTarget'] = subArgs['shiftTarget']
+    def build_ShiftedChannelQuantMSE(model: nn.Module, layerDisabled, prv_name="", delta=1.0, **kwargs):
+        for name, module in model.named_children():
+            curName = prv_name+'.'+name
+            if isinstance(module, QuantModule):
+                if module.ignore_reconstruction is True:
+                    continue
+                if curName not in layerDisabled:
+                    # print("Build Layer : ", curName)
+                    build_ShiftedChannelQuantMSELayer(model, curName, module, delta, **kwargs)
+            elif isinstance(module, QuantBasicBlock):
+                if module.ignore_reconstruction is True:
+                    continue
+                if curName in layerDisabled:
+                    # print("Build Block : ", curName)
+                    build_ShiftedChannelQuantMSEBlock(model, curName, module, delta, **kwargs)
+                else:
+                    build_ShiftedChannelQuantMSE(module, layerDisabled, curName, delta, **kwargs)
+            else:
+                build_ShiftedChannelQuantMSE(module, layerDisabled, curName, delta, **kwargs)
+    prv_name = ''
+    build_ShiftedChannelQuantMSE(qnn, layerDisabled, '', delta=1.0, **kwargs)
+    
+    accuracy, loss = validate_with_loss(test_loader, qnn, print_result=False, bit=args.n_bits_w)
+    accuracy = accuracy.item()
+    loss = loss.item()
+    print(f'accuracy of qnn_hard   : {accuracy:.3f}, {loss:.3e}')
+    
+    
+    
+    return qnn, accuracy, loss
+    
+def channelShift_wLoss(test_loader, train_loader, cali_data, subArgs, args):
     kwargs = dict(
         cali_data=cali_data, 
         iters=args.iters_w, 
@@ -151,21 +211,25 @@ def channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, subArgs, a
 
     layerEnabled = [
         '.model.layer1.0',
-        '.model.layer1.1',
-        '.model.layer2.0',
-        '.model.layer2.1',
-        '.model.layer3.0',
-        '.model.layer3.1',
-        '.model.layer4.0',
-        '.model.layer4.1',
-        '.model.fc',
+        # '.model.layer1.1',
+        # '.model.layer2.0',
+        # '.model.layer2.1',
+        # '.model.layer3.0',
+        # '.model.layer3.1',
+        # '.model.layer4.0',
+        # '.model.layer4.1',
+        # '.model.fc',
     ]
     
     qnn = build_qnn(args, test_loader)
-    bot = telegram.Bot(token=botInfo['token']) if botInfo is not None else None
-    msg = f'Starting with {k_lmda} & {k_iters} & {subArgs["shiftTarget"]} & WA{args.n_bits_w}/{args.n_bits_a}'
-    if bot is not None:
-        bot.sendMessage(chat_id=botInfo['id'], text=msg)
+    
+    #Run Calibration for weight quant.
+    print(f"Calibration for weight quant. : {args.w_scale_method} scale mode")
+    qnn.set_quant_state(True, False)
+    _ = qnn(cali_data[:64].to(device))
+    if not args.skip_test:
+        print(f'accuracy of qnn (with cal.)  : {validate_model(test_loader, qnn):.3f}')
+        
     #build_ShiftedChannelQuant(qnn, layerEnabled, '', delta=1100, **kwargs) #set All Layers
     build_ShiftedChannelQuant(qnn, layerEnabled, '', **kwargs) #set All Layers
     qnn.set_quant_state(False, False)# Default Setting
@@ -174,7 +238,7 @@ def channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, subArgs, a
     loss_dic = dict()
     for layer in layerEnabled:
         print("Reconstructing Layer[Weight]: ", layer)
-        kwargs['iters'] = k_iters if layer not in ['.model.layer4.1'] else k_iters*3//2
+        kwargs['iters'] = k_iters
         #Before Quant
         #Cache input features(with quant state)
         set_cache_state(qnn, [layer], prv_name='', state='if')
@@ -206,21 +270,20 @@ def channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, subArgs, a
         
         # #Hard Result
         # QuantRecursiveToggle_hardTarget(qnn, [layer], '', **kwargs)
-        if k_iters>0 and layer in ['.model.layer4.1', '.model.fc']:
-            accuracys += [validate_model(test_loader, qnn, print_result=True).cpu().numpy()]
+        # if k_iters>0 and layer in ['.model.layer4.1', '.model.fc']:
+        if k_iters>0:
+            accuracys += [validate_model(test_loader, qnn, print_result=True).cpu().numpy().item()]
             print(f'accuracy of qnn_hard{layer:28s}    : {accuracys[-1]:.3f}')
         
         qnn.restore_quantization_state()
         ####---- Test Area ---- End   ####
     
-    shiftTarget = subArgs['shiftTarget']
+    # shiftTarget = subArgs['shiftTarget']
     
-    skipped = '_skip' if len(skipShiftLayer) > 0 else ''
-    if bot is not None:
-        bot.sendMessage(chat_id=botInfo['id'], text=str(np.array(accuracys)))
-    with open(f'./temp/loss_{k_lmda:.3e}_itr{k_iters}_{str(shiftTarget)}{skipped}.pkl', 'wb') as f:
-        pickle.dump(loss_dic, f)
-    return qnn
+    # skipped = '_skip' if len(skipShiftLayer) > 0 else ''
+    # with open(f'./temp/loss_{k_lmda:.3e}_itr{k_iters}_{str(shiftTarget)}{skipped}.pkl', 'wb') as f:
+    #     pickle.dump(loss_dic, f)
+    return qnn, accuracys
 
 def channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, subArgs, args):
     
@@ -293,15 +356,19 @@ def channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, subArgs, ar
 if __name__ == '__main__':
     #Ready For Simulation
     args = loadArgments()
+    
+    #TODO: For Debug Code
+    args.test = True
+    args.n_bits = 4
+    args.a_bits = 4
+    args.w_scale_method = 'max'
+    args.run_device ='cuda:1'
+    
     device = torch.device(args.run_device if torch.cuda.is_available() else 'cpu')
     seed_all(args.seed)
     
-    if args.dataset == 'cifar10':
-        train_loader, test_loader = build_cifar10_data(batch_size=args.batch_size, workers=args.workers,
-                                                        data_path=args.data_path)
-    elif args.dataset == 'imagenet':
-        train_loader, test_loader = build_imagenet_data(batch_size=args.batch_size, workers=args.workers,
-                                                        data_path=args.data_path)    
+    if args.dataset == 'cifar10':    train_loader, test_loader = build_cifar10_data (batch_size=args.batch_size, workers=args.workers, data_path=args.data_path)
+    elif args.dataset == 'imagenet': train_loader, test_loader = build_imagenet_data(batch_size=args.batch_size, workers=args.workers, data_path=args.data_path)
     # cnn = resnet18_imagenet()
     # state_dict = torch.load('./pretrained/Pytorch_imagenet/resnet18_imagenet.pth.tar', map_location='cpu')
     # cnn.load_state_dict(state_dict)
@@ -310,39 +377,30 @@ if __name__ == '__main__':
         init_delta_zero(args, cali_data, test_loader)
         print("Making checkpoint data done")
         exit(1)
-    #Telegram Bot setting.
-    botInfo = {'token':'5820626937:AAHHsvT__T7xkCiLujwi799CyMoWtwNkbTM', 'id':'5955354823'} if args.msg_bot_enable else None
-
+    #Normal Quant
+    #Random Quant(without calibration)
     # #Add these to common parameters
-    itr = 80000
-    # itr = 100
-    lmda = 2
-    shiftTargets = [[100]]
-    # shiftTarget = [3/4, 3/2]
-    # shiftTargets = [[2/2, 1/2, 3/2],[4/4, 3/4, 5/4],[8/8, 7/8, 9/8]]
-    # shiftTargets = [[2/2, 1/2, 3/2]]
-    # shiftTargets += [[4/4, 3/4, 5/4]]
-    # shiftTarget = [8/8, 4/8, 2/8, 1/8]
-    # shiftTarget = [1.5, 1.25, 1.0]
-    # shiftTargets = [[2/2, 1/2], [2/2, 3/2, 1/2], [4/4, 5/4, 3/4]]
-    # shiftTargets = [[2/2, 3/2, 1/2], [4/4, 5/4, 3/4], [4/4, 5/4, 3/4]]
-    # # # # for itr in [1000, 4000, 8000]:
-    # for lmda in range(2, 4):
-    lmdas = [(i+1)/3 for i in range(6)]
+    
+    
+    
+    itr = 625
+    lmdas = [1]
+    shiftTargets = [[1.0-0.03125, 1.0+0.03125, 1.0]]
     for lmda in lmdas:
         for shiftTarget in shiftTargets:
             kwargs = dict()
             kwargs['iters'] = itr
             kwargs['lmda'] = (10)**(-lmda)
             kwargs['shiftTarget'] = shiftTarget
-            qnn = channelShift_wLoss(test_loader, train_loader, cali_data, botInfo, kwargs, args)
-        # params_dict = {}
-        # for name, param in qnn.named_parameters():    # for name, param in qnn.named_parameters():
-        #     print("torch saving ", name, param.data.shape)
-        #     params_dict[name] = param.data
-        # torch.save(params_dict, f'./qnn_with_weight.pth')
-        # param_st = torch.load('qnn_weight_quant.pth')
-        # qnn.load_state_dict(param_st)
-        # kwargs['iters'] = 100
-        # channelShift_wLoss_feature(qnn, test_loader, cali_data, botInfo, kwargs, args)
-    
+            if args.test:
+                qnn, acc, loss = channelShift_wMSE(test_loader, train_loader, cali_data, kwargs, args)
+            else:
+                qnn, acc = channelShift_wLoss(test_loader, train_loader, cali_data, kwargs, args)
+            # exit(1)
+            with open(f'{args.run_device}.log', 'a') as fout:
+                now = datetime.now()
+                date_string = now.strftime("[%m-%d %H:%M:%S]")
+                config = f'{lmda}, {shiftTarget}'
+                fout.write(f'{date_string}:{config}: {acc} : {loss:3e} #{args}\n')
+            exit(1)
+            

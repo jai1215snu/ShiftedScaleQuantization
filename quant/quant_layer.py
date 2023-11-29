@@ -53,6 +53,7 @@ class UniformAffineQuantizer(nn.Module):
         self.n_levels = 2 ** self.n_bits
         self.delta = None
         self.zero_point = None
+        self.raw_zero_point = None
         self.inited = False
         self.leaf_param = leaf_param
         self.channel_wise = channel_wise
@@ -75,14 +76,16 @@ class UniformAffineQuantizer(nn.Module):
 
     def forward(self, x: torch.Tensor):
         if self.inited is False:
-            if self.leaf_param:
-                delta, zero_point = self.init_quantization_scale(x, self.channel_wise)
-                self.delta = torch.nn.Parameter(delta)
-                self.zero_point = torch.nn.Parameter(zero_point)
-                print("Making initialization")
-            else:
-                self.delta, self.zero_point = self.init_quantization_scale(x, self.channel_wise)
-            
+            # if self.leaf_param:
+            #     delta, zero_point = self.init_quantization_scale(x, self.channel_wise)
+            #     self.delta = torch.nn.Parameter(delta)
+            #     self.zero_point = torch.nn.Parameter(zero_point)
+            #     print("Making initialization")
+            # else:
+                # self.delta, self.zero_point = self.init_quantization_scale(x, self.channel_wise)
+            delta, zero_point, self.raw_zero_point = self.init_quantization_scale(x, self.channel_wise)
+            self.delta = torch.nn.Parameter(delta)
+            self.zero_point = torch.nn.Parameter(zero_point)
             self.inited = True
 
         # start quantization
@@ -95,7 +98,7 @@ class UniformAffineQuantizer(nn.Module):
         return x_dequant
 
     def init_quantization_scale(self, x: torch.Tensor, channel_wise: bool = False):
-        delta, zero_point = None, None
+        delta, zero_point, raw_zero_point = None, None, None
         if channel_wise:
             x_clone = x.clone().detach()
             n_channels = x_clone.shape[0]
@@ -105,15 +108,18 @@ class UniformAffineQuantizer(nn.Module):
                 x_max = x_clone.abs().max(dim=-1)[0]
             delta = x_max.clone()
             zero_point = x_max.clone()
+            raw_zero_point = x_max.clone()
             # determine the scale and zero point channel-by-channel
             for c in range(n_channels):
-                delta[c], zero_point[c] = self.init_quantization_scale(x_clone[c], channel_wise=False)
+                delta[c], zero_point[c], raw_zero_point[c] = self.init_quantization_scale(x_clone[c], channel_wise=False)
             if len(x.shape) == 4:
                 delta = delta.view(-1, 1, 1, 1)
                 zero_point = zero_point.view(-1, 1, 1, 1)
+                raw_zero_point = raw_zero_point.view(-1, 1, 1, 1)
             else:
                 delta = delta.view(-1, 1)
                 zero_point = zero_point.view(-1, 1)
+                raw_zero_point = raw_zero_point.view(-1, 1)
         else:
             if 'max' in self.scale_method:
                 x_min = min(x.min().item(), 0)
@@ -123,15 +129,17 @@ class UniformAffineQuantizer(nn.Module):
                     x_max = x_max * (self.n_bits + 2) / 8
 
                 if self.sym:
+                    x_absmax = max(abs(x_min), x_max)
                     x_min, x_max = -x_absmax if x_min < 0 else 0, x_absmax
 
                 delta = float(x_max - x_min) / (self.n_levels - 1)
                 if delta < 1e-8:
-                    warnings.warn('Quantization range close to zero: [{}, {}]'.format(x_min, x_max))
+                    # warnings.warn('Quantization range close to zero: [{}, {}]'.format(x_min, x_max))
                     delta = 1e-8
 
                 zero_point = round(-x_min / delta)
                 delta = torch.tensor(delta).type_as(x)
+                raw_zero_point = -x_min
 
             elif self.scale_method == 'mse':
                 x_max = x.max()
@@ -151,10 +159,11 @@ class UniformAffineQuantizer(nn.Module):
                         best_score = score
                         delta = (new_max - new_min) / (2 ** self.n_bits - 1)
                         zero_point = (- new_min / delta).round() if not self.sym else 0
+                        raw_zero_point = -new_min if not self.sym else 0
             else:
                 raise NotImplementedError
 
-        return delta, zero_point
+        return delta, zero_point, raw_zero_point
 
     def quantize(self, x, max, min):
         delta = (max - min) / (2 ** self.n_bits - 1)
@@ -219,11 +228,14 @@ class QuantModule(nn.Module):
         self.cached_inp_features = []
         self.cached_out_features = []
         
-        
-        n_ch = self.weight.shape[0]
-        self.alpha_out = torch.nn.Parameter(torch.ones(n_ch) .view(1, n_ch, 1, 1))
-        self.beta_out  = torch.nn.Parameter(torch.zeros(n_ch).view(1, n_ch, 1, 1))
-        
+        if self.weight.dim() == 4:#Conv
+            n_ch = self.weight.shape[0]
+            self.alpha_out = torch.nn.Parameter(torch.ones(n_ch) .view(1, n_ch, 1, 1))
+            self.beta_out  = torch.nn.Parameter(torch.zeros(n_ch).view(1, n_ch, 1, 1))
+        else:
+            n_ch = self.weight.shape[0]
+            self.alpha_out = torch.nn.Parameter(torch.ones(n_ch) .view(1, n_ch))
+            self.beta_out  = torch.nn.Parameter(torch.zeros(n_ch).view(1, n_ch))
         self.selection = None # for greedy selection
         
         self.selectionInited = False

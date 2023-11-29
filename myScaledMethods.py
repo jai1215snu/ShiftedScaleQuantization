@@ -4,13 +4,40 @@ from quant.quant_model import QuantModel
 from quant.quant_layer import QuantModule, UniformAffineQuantizer
 from quant.quant_block import BaseQuantBlock, QuantBasicBlock
 import pandas as pd
-from pretrained.PyTorch_CIFAR10.cifar10_models.resnet import resnet18
+from pretrained.PyTorch_CIFAR10.cifar10_models.resnet import resnet18, resnet34, resnet50
 from models.resnet import resnet18 as resnet18_imagenet
 
 from quant.channelQuant import ChannelQuant
+from quant.channelQuantMSE import ChannelQuantMSE
 from tqdm import tqdm
 import telegram
 from common import *
+
+
+def build_ShiftedChannelQuantMSELayer(model, curName, layer, delta=1.0, **kwargs):
+    shiftTarget = kwargs['shiftTarget']
+    level     = kwargs['level']
+    threshold = kwargs['threshold']
+    opt_mode = kwargs['opt_mode']
+    layer.weight_quantizer = ChannelQuantMSE(delta, uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data, shiftTarget=shiftTarget, opt_mode=opt_mode, level=level, threshold=threshold, name=curName)
+    layer.use_weight_quant = True
+    layer.cache_features   = 'none'
+    layer.weight_quantizer.init_scale(layer.org_weight.data)
+    
+def build_ShiftedChannelQuantMSEBlock(model, prv_name, block, delta=1.0, **kwargs):
+    for name, layer in block.named_children():
+        curName = prv_name+'.'+name
+        shiftTarget = kwargs['shiftTarget']
+        level     = kwargs['level']
+        threshold = kwargs['threshold']
+        opt_mode = kwargs['opt_mode']
+        # print("block const name: ", curName, type(layer))
+        if isinstance(layer, QuantModule):
+            if isinstance(layer.weight_quantizer, UniformAffineQuantizer):
+                layer.weight_quantizer = ChannelQuantMSE(delta, uaq=layer.weight_quantizer, weight_tensor=layer.org_weight.data, shiftTarget=shiftTarget, opt_mode=opt_mode, level=level, threshold=threshold, name=curName)
+                layer.use_weight_quant = True
+                layer.cache_features   = 'none'
+                layer.weight_quantizer.init_scale(layer.org_weight.data)
 
 def build_ShiftedChannelQuantLayer(model, curName, layer, delta=1.0, **kwargs):
     shiftTarget = kwargs['shiftTarget'] if not curName.startswith(tuple(kwargs['skipShiftLayer'])) else [2/2]
@@ -79,7 +106,6 @@ def set_quant_state_block(model, layers, prv_name='', state=False, act=False):
                 module.set_quant_state_block(state, act)
         else:
             set_quant_state_block(module, layers, curName, state, act)
-        
 
 def set_cache_state(model, layers, prv_name='', state='none'):
     for name, module in model.named_children():
@@ -92,7 +118,6 @@ def set_cache_state(model, layers, prv_name='', state='none'):
             continue
         else:
             set_cache_state(module, layers, curName, state)     
-            
 
 def channelGreedyTest_wLoss(test_loader, cali_data, botInfo, args):
     kwargs = dict(
@@ -182,6 +207,8 @@ def run_GreedyLoss(model, curName, layer, **kwargs):
 def init_delta_zero(args, cali_data, test_loader):
     if args.dataset == 'cifar10':
         cnn = resnet18(pretrained=True, device=args.run_device)
+        # cnn = resnet34(pretrained=True, device=args.run_device)
+        # cnn = resnet50(pretrained=True, device=args.run_device)
     elif args.dataset == 'imagenet':
         cnn = resnet18_imagenet()
         state_dict = torch.load(
@@ -235,25 +262,24 @@ def init_delta_zero(args, cali_data, test_loader):
         
 def build_qnn(args, test_loader):
     if args.dataset == 'cifar10':
-        cnn = resnet18(pretrained=True, device=args.run_device)
+        # cnn = resnet18(pretrained=True, device=args.run_device)
+        # cnn = resnet34(pretrained=True, device=args.run_device)
+        cnn = resnet50(pretrained=True, device=args.run_device)
     elif args.dataset == 'imagenet':
         cnn = resnet18_imagenet()
         state_dict = torch.load('./pretrained/Pytorch_imagenet/resnet18_imagenet.pth.tar', map_location='cpu')
         cnn.load_state_dict(state_dict)
-    # cnn.cuda()
+    
     cnn.to(args.run_device)
     cnn.eval()
     if not args.skip_test:
-        print(f'accuracy of original : {validate_model(test_loader, cnn):.3f}')
+        print(f'accuracy of original : {validate_model(test_loader, cnn, bit=args.n_bits_w):.3f}')
     
     # build quantization parameters
-    # wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'tune_delta_zero':False, 'symmetric':True}
-    # aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'tune_delta_zero':False, 'leaf_param': True, 'symmetric':False}
-    #TODO:
-    wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': 'mse', 'tune_delta_zero':False, 'symmetric':False}
-    aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': 'mse', 'tune_delta_zero':False, 'leaf_param': True, 'symmetric':False}
+    wq_params = {'n_bits': args.n_bits_w, 'channel_wise': args.channel_wise, 'scale_method': args.w_scale_method, 'tune_delta_zero':False, 'symmetric':False}
+    aq_params = {'n_bits': args.n_bits_a, 'channel_wise': False, 'scale_method': args.a_scale_method, 'tune_delta_zero':False, 'leaf_param': True, 'symmetric':False}
     qnn = QuantModel(model=cnn, weight_quant_params=wq_params, act_quant_params=aq_params)
-    # qnn.cuda()
+
     qnn.to(args.run_device)
     qnn.eval()
     if not args.disable_8bit_head_stem:
@@ -266,17 +292,18 @@ def build_qnn(args, test_loader):
     elif args.dataset == 'imagenet':
         prefix = 'IMAGENET'
     
-    st = torch.load(f'./checkPoint/{prefix}_QNN_CW_W{args.n_bits_w}_A{args.n_bits_a}.pth')
-    missing = ["model.conv1.alpha_out", "model.conv1.beta_out", "model.layer1.0.conv1.alpha_out", "model.layer1.0.conv1.beta_out", "model.layer1.0.conv2.alpha_out", "model.layer1.0.conv2.beta_out", "model.layer1.1.conv1.alpha_out", "model.layer1.1.conv1.beta_out", "model.layer1.1.conv2.alpha_out", "model.layer1.1.conv2.beta_out", "model.layer2.0.conv1.alpha_out", "model.layer2.0.conv1.beta_out", "model.layer2.0.conv2.alpha_out", "model.layer2.0.conv2.beta_out", "model.layer2.0.downsample.alpha_out", "model.layer2.0.downsample.beta_out", "model.layer2.1.conv1.alpha_out", "model.layer2.1.conv1.beta_out", "model.layer2.1.conv2.alpha_out", "model.layer2.1.conv2.beta_out", "model.layer3.0.conv1.alpha_out", "model.layer3.0.conv1.beta_out", "model.layer3.0.conv2.alpha_out", "model.layer3.0.conv2.beta_out", "model.layer3.0.downsample.alpha_out", "model.layer3.0.downsample.beta_out", "model.layer3.1.conv1.alpha_out", "model.layer3.1.conv1.beta_out", "model.layer3.1.conv2.alpha_out", "model.layer3.1.conv2.beta_out", "model.layer4.0.conv1.alpha_out", "model.layer4.0.conv1.beta_out", "model.layer4.0.conv2.alpha_out", "model.layer4.0.conv2.beta_out", "model.layer4.0.downsample.alpha_out", "model.layer4.0.downsample.beta_out", "model.layer4.1.conv1.alpha_out", "model.layer4.1.conv1.beta_out", "model.layer4.1.conv2.alpha_out", "model.layer4.1.conv2.beta_out", "model.fc.alpha_out", "model.fc.beta_out"]
-    for param in qnn.state_dict():
-        if param in missing:
-            st[param] = qnn.state_dict()[param]
+    # st = torch.load(f'./checkPoint/{prefix}_QNN_CW_W{args.n_bits_w}_A{args.n_bits_a}.pth')
+    # missing = ["model.conv1.alpha_out", "model.conv1.beta_out", "model.layer1.0.conv1.alpha_out", "model.layer1.0.conv1.beta_out", "model.layer1.0.conv2.alpha_out", "model.layer1.0.conv2.beta_out", "model.layer1.1.conv1.alpha_out", "model.layer1.1.conv1.beta_out", "model.layer1.1.conv2.alpha_out", "model.layer1.1.conv2.beta_out", "model.layer2.0.conv1.alpha_out", "model.layer2.0.conv1.beta_out", "model.layer2.0.conv2.alpha_out", "model.layer2.0.conv2.beta_out", "model.layer2.0.downsample.alpha_out", "model.layer2.0.downsample.beta_out", "model.layer2.1.conv1.alpha_out", "model.layer2.1.conv1.beta_out", "model.layer2.1.conv2.alpha_out", "model.layer2.1.conv2.beta_out", "model.layer3.0.conv1.alpha_out", "model.layer3.0.conv1.beta_out", "model.layer3.0.conv2.alpha_out", "model.layer3.0.conv2.beta_out", "model.layer3.0.downsample.alpha_out", "model.layer3.0.downsample.beta_out", "model.layer3.1.conv1.alpha_out", "model.layer3.1.conv1.beta_out", "model.layer3.1.conv2.alpha_out", "model.layer3.1.conv2.beta_out", "model.layer4.0.conv1.alpha_out", "model.layer4.0.conv1.beta_out", "model.layer4.0.conv2.alpha_out", "model.layer4.0.conv2.beta_out", "model.layer4.0.downsample.alpha_out", "model.layer4.0.downsample.beta_out", "model.layer4.1.conv1.alpha_out", "model.layer4.1.conv1.beta_out", "model.layer4.1.conv2.alpha_out", "model.layer4.1.conv2.beta_out", "model.fc.alpha_out", "model.fc.beta_out"]
+    # for param in qnn.state_dict():
+    #     if param in missing:
+    #         st[param] = qnn.state_dict()[param]
     
-    qnn.load_state_dict(st)
-    qnn.set_quant_init_state() #set weight_quantizer.inited = True
+    # qnn.load_state_dict(st)
+    # 강제 초기화 코드. calibration 하지 않고 data load했을 때 사용.
+    # qnn.set_quant_init_state() #set weight_quantizer.inited = True
     
     if not args.skip_test:
-        print(f'accuracy of qnn    : {validate_model(test_loader, qnn):.3f}')
+        print(f'accuracy of qnn(not cal.)  : {validate_model(test_loader, qnn, bit=args.n_bits_w):.3f}')
     return qnn
 
 def run_layerRandomize(model, curName, layer, **kwargs):

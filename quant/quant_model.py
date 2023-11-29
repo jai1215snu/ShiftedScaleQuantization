@@ -22,31 +22,21 @@ class QuantModel(nn.Module):
         prev_quantmodule = None
         for name, child_module in module.named_children():
             curName = moduleName+'.'+name
-            # print("quant", "-"*depth, curName)
-            # if name in ['relu', 'relu2'] and curName not in ['.layer1.0.relu']:#'.layer1.0.relu']:
-            # if name in ['relu2'] and curName not in ['.layer1.0.relu']:#'.layer1.0.relu']:
-            #     continue
             if name in ['relu2']:
                 continue
-            # print(type(child_module), specials)
             if type(child_module) in specials:
-                # print("Making Special block")
                 setattr(module, name, specials[type(child_module)](child_module, weight_quant_params, act_quant_params))
                 qmodule = getattr(module, name)
                 qmodule.setPathName(curName)
-
             elif isinstance(child_module, (nn.Conv2d, nn.Linear)):
                 setattr(module, name, QuantModule(child_module, weight_quant_params, act_quant_params))
                 prev_quantmodule = getattr(module, name)
                 prev_quantmodule.pathName = curName
-
             elif isinstance(child_module, (nn.ReLU, nn.ReLU6)):
                 if prev_quantmodule is not None:
                     prev_quantmodule.activation_function = child_module
                     setattr(module, name, StraightThrough())
-                    # print(">>>>>>Found ReLU, adding to :", prev_quantmodule.pathName)
                 else:
-                    # print(">>>>>>Found ReLU - no quant module before")
                     continue
             elif isinstance(child_module, StraightThrough):
                 continue

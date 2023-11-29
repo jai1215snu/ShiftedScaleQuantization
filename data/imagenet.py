@@ -8,7 +8,7 @@ def build_imagenet_data(data_path: str = '', input_size: int = 224, batch_size: 
                         dist_sample: bool = False):
     print('==> Using Pytorch Dataset')
 
-    traindir = os.path.join(data_path, 'train1024')
+    traindir = os.path.join(data_path, 'train')
     valdir = os.path.join(data_path, 'val')
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
